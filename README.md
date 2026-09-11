@@ -1,4 +1,3 @@
-```markdown
 # 🕸️ ReconWeave
 
 **Attack Surface Mapper | Intelligent Crawler | OSINT & Secrets Scanner**

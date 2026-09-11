@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GUI](https://img.shields.io/badge/GUI-Tkinter-orange.svg)]()
 
-**ReconWeave** is an elite, zero-dependency Attack Surface Mapper and Intelligent Web Crawler designed for penetration testers, bug bounty hunters, and security researchers. Built entirely on Python's standard library, it requires no `pip` installations and provides deep inspection of web applications, automatic secret detection, and seamless proxy chaining.
+**ReconWeave** is an elite, zero-dependency Attack Surface Mapper and Intelligent Web Crawler designed for penetration testers, bug bounty hunters, and security researchers. Built entirely on Python's standard library, it provides deep inspection of web applications, automatic secret detection, and seamless proxy chaining.
 
 > ⚠️ **Disclaimer:** This tool is strictly for **authorized security testing**, educational purposes, and sanctioned lab environments. Unauthorized scanning or exploitation is illegal. Always obtain explicit written permission before testing any target.
 

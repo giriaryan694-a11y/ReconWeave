@@ -121,4 +121,4 @@ ReconWeave/
 
 **Author:** Aryan Giri · `giriaryan694-a11y`
 
-The supplied files did not include the repository's `LICENSE` file, and the previous README mixed an MIT badge with an Apache-2.0 statement. Include the actual licence file in the repository and make the GitHub licence metadata and README agree with it. Do not treat this note as granting a licence that is not present in the repository.
+

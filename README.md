@@ -1,127 +1,124 @@
-# 🕸️ ReconWeave
+# ReconWeave
 
-**Attack Surface Mapper | Intelligent Crawler | OSINT & Secrets Scanner**
+**Attack-surface mapping · Web crawling · Passive OSINT · Secret-pattern detection**
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GUI](https://img.shields.io/badge/GUI-Tkinter-orange.svg)]()
+ReconWeave is a desktop reconnaissance helper for authorised security assessments and lab environments. It combines a Tkinter interface with a bounded HTTP crawler, URL and form extraction, JavaScript endpoint heuristics, passive OSINT lookups, regex-based secret detection, and scoped directory/subdomain discovery.
 
-**ReconWeave** is an elite, zero-dependency Attack Surface Mapper and Intelligent Web Crawler designed for penetration testers, bug bounty hunters, and security researchers. Built entirely on Python's standard library, it provides deep inspection of web applications, automatic secret detection, and seamless proxy chaining.
+> **Use only within written authorisation and the agreed scope.** ReconWeave has an authorisation checkbox and confirmation prompts as guardrails, not as proof of permission. You are responsible for validating the exact hosts, ports, protocols, request rate, and activities approved by the asset owner.
 
-> ⚠️ **Disclaimer:** This tool is strictly for **authorized security testing**, educational purposes, and sanctioned lab environments. Unauthorized scanning or exploitation is illegal. Always obtain explicit written permission before testing any target.
+## Features
 
----
+### Crawler and application mapping
 
-## ✨ Core Features
+- Breadth-first crawling with configurable depth, page cap, timeout, delay, TLS verification, user-agent, and HTTP/HTTPS proxy. A depth value of `0` means unlimited depth; the page cap still applies.
+- Extraction of links, scripts, forms, named inputs, query parameters, URL paths, API-like routes, and JavaScript `fetch`, Axios, XHR, and redirect patterns.
+- Optional discovery from `robots.txt` and XML sitemaps.
+- Tracks response status, response length, redirect history, and basic security-header observations.
+- Keeps crawl requests within the configured scheme/port and host scope. Out-of-scope redirects are recorded but not followed.
 
-### 🕸️ Intelligent Crawling & Parsing
-* **Strict URL Extraction:** Advanced Regex patterns eliminate false positives (e.g., ignoring environment variables like `APPDATA` or `COMSPEC` while catching valid relative paths and extensions).
-* **Deep JS Inspection:** Parses JavaScript source code to extract hidden API endpoints, `fetch`/`axios`/`XHR` calls, and `window.location` redirects.
-* **Unlimited Depth:** BFS (Breadth-First Search) crawler with configurable depth (set to `0` for unlimited) and page limits.
+Endpoint extraction is heuristic rather than a JavaScript parser. Minified code, dynamically generated routes, framework-specific APIs, and unusual syntax may be missed; regex matches can also be false positives.
 
-### 🔐 Secrets & OSINT Scanner
-Automatically scans all HTML and JS responses for exposed credentials and sensitive infrastructure:
-* ☁️ **Cloud Buckets:** AWS S3, GCP Storage, Azure Blob
-* 🔑 **Tokens & Keys:** AWS Access Keys, GitHub Tokens (`ghp_`), Stripe Live Keys, Google API Keys, JWTs
-* 📜 **Certificates:** RSA/EC Private Keys
-* 🌐 **Network Info:** Internal IP addresses (RFC 1918), Email addresses
-* 🗝️ **Generic Secrets:** Hardcoded passwords, API keys, and auth tokens in source code
+### Passive OSINT
 
-### 🌐 Proxy Chaining (Burp Suite / ZAP)
-* Full support for upstream HTTP/HTTPS proxies.
-* Route all crawler and brute-force traffic directly through **Burp Suite** (`http://127.0.0.1:8080`) for manual inspection, interception, and repeater testing.
+- Certificate Transparency data from `crt.sh`.
+- Historical URLs from the Internet Archive CDX API.
+- Optional DuckDuckGo results when a compatible `ddgs` or `duckduckgo-search` package is installed.
+- Domain-boundary filtering before OSINT results are shown.
 
-### 💥 Directory & Path Brute-Forcer
-* Built-in brute-force engine with **Sequential** and **Parallel** (Thread Pool) modes.
-* Automatically populates found directories from the crawler for immediate recursive fuzzing.
-* Generates ready-to-use `ffuf` commands via right-click context menus.
+Passive OSINT asks third-party providers for public data. It does not establish that a discovered host is in your contractual scope. Review hosts individually before launching active requests.
 
-### 📊 Interactive Visualizations
-* **OSINT Radial Graph:** Interactive node-based graph. Drag nodes, pan, zoom, and hover for details.
-* **Tree Command View:** `tree`-style directory mapping displaying **HTTP Status Codes** and **Parameters** inline.
-* **Hover Tooltips:** Instantly view full URLs and status codes by hovering over paths.
+### Secret-pattern scanning
 
-### 🎨 UI & Export
-* **Themes:** Dark (GitHub), Light, and Cyber (Matrix/Hacker) themes.
-* **Exports:** JSON, TXT URL lists, Graphviz DOT, and Mermaid Markdown.
+The scanner searches fetched textual responses for patterns resembling cloud identifiers, API tokens, JWTs, private-key headers, internal IPv4 addresses, email addresses, and generic hard-coded secrets.
 
----
+Matches are **unverified leads**, not proof that a credential is valid or exploitable. False positives and false negatives are expected. Results can contain sensitive material, so protect exports and delete them when no longer needed.
 
-## 🚀 Installation
+### Directory and subdomain discovery
 
-ReconWeave is built using **only Python standard libraries** (Tkinter, urllib, re, threading, etc.). No `requirements.txt` or `pip install` is needed!
+- Built-in common wordlists and user-supplied wordlists.
+- Sequential or parallel directory checks, with configurable request delay, concurrency, timeout, proxy, and interesting HTTP statuses.
+- Subdomain checks use validated DNS-label candidates and are restricted to the configured target's estimated domain scope.
+- Copy a generated `ffuf` command from the context menu; review the command and scope before running it.
 
-### Prerequisites
-* **Python 3.8+**
-* **Tkinter** (Usually bundled with Python on Windows/macOS. Linux users may need to install it):
+Parallel mode can create significant request bursts even when a per-worker delay is set. Use conservative settings against shared or production systems. The bundled root-domain logic is a **best-effort heuristic**, not a complete Public Suffix List. Be especially careful with country-code suffixes and multi-tenant hosting domains. When uncertain, disable subdomain expansion and use an explicit host allowlist.
+
+### Results, visualisation, and export
+
+- Tabs: **Crawl**, **Results & Headers**, **Brute Session**, **OSINT & Dorking**, **Secrets & Creds**, **Wordlists / Config**, and **Graph & Tree View**.
+- Dark, Light, and Cyber interface themes.
+- JSON exports for crawl, brute, and secret results; URL-list, Graphviz DOT, and Mermaid exports for visualisation.
+
+Missing security headers and server banners are observations. They are not, by themselves, confirmation of an exploitable vulnerability.
+
+## Requirements
+
+- Python 3.8 or later.
+- Tkinter. It is usually bundled with Python on Windows and macOS. On Debian/Ubuntu/Kali, install it with:
+
   ```bash
-  # Debian/Ubuntu/Kali
-  sudo apt update && sudo apt install python3-tk
+  sudo apt update
+  sudo apt install python3-tk
   ```
 
-### Setup
+Core crawling and parsing use Python's standard library. DuckDuckGo search is optional. Install one compatible package if you want that source enabled:
+
+```bash
+python -m pip install ddgs
+```
+
+A legacy-compatible alternative, when suitable for your Python version, is:
+
+```bash
+python -m pip install duckduckgo-search
+```
+
+## Installation and launch
+
 ```bash
 git clone https://github.com/giriaryan694-a11y/ReconWeave.git
 cd ReconWeave
-python3 main.py
+python main.py
 ```
 
----
+On Linux, if the GUI does not open, verify that the Tkinter package is installed and that a graphical display is available. ReconWeave is a desktop Tk application; a headless SSH shell alone is not sufficient to show its interface.
 
-## 🛠️ Usage Guide
+## Basic workflow
 
-### 1. Basic Crawl
-1. Launch `main.py`.
-2. Enter your **Target URL** (e.g., `http://testphp.vulnweb.com/`).
-3. Check the **"I confirm written authorization"** box.
-4. Click **Start Crawl**.
-5. Monitor the logs and switch to the **Results & Tables** or **Secrets & OSINT** tabs to view findings.
+1. Start ReconWeave and enter the exact authorised target URL in **Target Configuration**.
+2. Confirm that written authorisation covers the target, protocol, port, and planned activity. Editing the target URL clears the confirmation.
+3. Start with a conservative crawl: a low page cap, a positive delay, TLS verification enabled, and subdomain inclusion disabled unless it is explicitly in scope.
+4. Review **Results & Headers**, **Secrets & Creds**, and **Graph & Tree View**. Treat findings as leads and verify them manually.
+5. Before active directory or subdomain discovery, review the selected bases and wordlist. Keep parallelism low on shared systems and stop immediately if the owner requests it.
+6. Export only the data you need. Secret exports may contain credentials or personal information.
 
-### 2. Chaining with Burp Suite
-1. Open Burp Suite and ensure the Proxy listener is active on `127.0.0.1:8080`.
-2. In ReconWeave's **Target Configuration** card, enter `http://127.0.0.1:8080` in the **Proxy** field.
-3. Start your crawl or brute-force session. All traffic will now appear in Burp's HTTP History.
+### Using Burp Suite or OWASP ZAP
 
-### 3. Brute-Forcing Discovered Paths
-1. Run a crawl to populate the **Brute Session** tab with discovered directories.
-2. Select a directory, choose a wordlist (built-in or custom), and click **Brute Selected**.
-3. Right-click any result in the Tree View to instantly copy an `ffuf` or `feroxbuster` command.
+1. Start the local proxy listener (for example, Burp's `http://127.0.0.1:8080`).
+2. Enter the listener URL in ReconWeave's **Proxy** field.
+3. Start the intended crawl or brute session and verify the requests in the proxy history.
+4. Keep TLS verification enabled where possible by trusting the proxy's CA certificate. Disabling verification makes the connection less secure and should be limited to controlled local testing when necessary.
 
----
+## Regression tests
 
-## 📂 Project Structure
+The accompanying `test_reconweave.py` exercises URL normalization, scheme/port scope checks, redirect restrictions, response-size bounds, form parsing, regex extraction, word validation, secret-finding de-duplication, and OSINT domain matching. Tests use a local HTTP server and do not scan external targets.
+
+```bash
+python -m unittest -v test_reconweave.py
+python -m py_compile main.py
+```
+
+## Project files
 
 ```text
 ReconWeave/
-├── main.py                 # Main application entry point (Complete standalone script)
-├── README.md               # Project documentation
-└── LICENSE                 # MIT License
+├── main.py              # Desktop application
+├── README.md            # Project documentation
+├── test_reconweave.py   # Local regression tests
+└── LICENSE              # Include the repository's actual license file
 ```
 
----
+## Credits and licence
 
-## 🖥️ Interface Tabs
+**Author:** Aryan Giri · `giriaryan694-a11y`
 
-| Tab | Description |
-| :--- | :--- |
-| **Crawl** | Target config, proxy settings, crawler options, and live execution logs. |
-| **Results & Tables** | Grouped tree or flat table of all pages, links, forms, parameters, and redirects. |
-| **Brute Session** | Directory brute-forcer with thread management and custom wordlist support. |
-| **Secrets & OSINT** | Dedicated table for leaked AWS keys, tokens, internal IPs, and cloud buckets. |
-| **Wordlists / Config** | Manage and test custom brute-force wordlists. |
-| **Graph & OSINT View** | Interactive Radial Graph and CLI-style Tree View with status codes. |
-
----
-
-## 📜 License
-
-This project is licensed under the Apache2.0 License. 
-
-**Credit:** Made by **Aryan Giri** | [giriaryan694-a11y](https://github.com/giriaryan694-a11y)
-
----
-
-<p align="center">
-  <i>Happy Hunting! 🏴‍☠️</i>
-</p>
-
+The supplied files did not include the repository's `LICENSE` file, and the previous README mixed an MIT badge with an Apache-2.0 statement. Include the actual licence file in the repository and make the GitHub licence metadata and README agree with it. Do not treat this note as granting a licence that is not present in the repository.

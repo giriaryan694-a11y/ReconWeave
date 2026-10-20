@@ -4,7 +4,7 @@ ReconWeave - Attack Surface Mapper | Intelligent Crawler | OSINT & Secrets Scann
 Credit: made by Aryan Giri | giriaryan694-a11y
 
 Authorized security testing only.
-Requirement: pip install duckduckgo-search
+Core functionality uses Python's standard library; DuckDuckGo search is optional.
 """
 
 import json
@@ -17,24 +17,31 @@ import time
 import tkinter as tk
 import webbrowser
 import urllib.parse
-import http.cookiejar
-import random
+import ipaddress
+import shlex
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, quote, unquote
-from urllib.request import Request, urlopen, HTTPRedirectHandler, HTTPSHandler, build_opener, ProxyHandler, HTTPCookieProcessor
-from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl
+from urllib.request import Request, HTTPRedirectHandler, HTTPSHandler, build_opener, ProxyHandler
+from urllib.error import HTTPError
 
-# Safe import for DDGS library
+# Optional search integration. Core crawling remains standard-library only.
 try:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     DDGS_AVAILABLE = True
+    DDGS_PACKAGE = "ddgs"
 except ImportError:
-    DDGS_AVAILABLE = False
+    try:
+        from duckduckgo_search import DDGS
+        DDGS_AVAILABLE = True
+        DDGS_PACKAGE = "duckduckgo-search"
+    except ImportError:
+        DDGS_AVAILABLE = False
+        DDGS_PACKAGE = None
 
 APP_NAME = "ReconWeave"
 CREDIT = "made by Aryan Giri | giriaryan694-a11y"
@@ -133,11 +140,16 @@ SUBDOMAIN_WORDLIST = [
     "metrics", "status2", "status2", "status2", "status2", "status2",
     "metrics", "status2", "status2", "status2", "status2", "status2",
 ]
+SUBDOMAIN_WORDLIST = list(dict.fromkeys(SUBDOMAIN_WORDLIST))
 
 URL_RE = re.compile(r"""["']((?:https?://[^"'<>\s]+)|(?:/[a-zA-Z0-9_\-./?%=&]+)|(?:[a-zA-Z0-9_\-][a-zA-Z0-9_\-./]*\.(?:php|asp|aspx|jsp|html|htm|nsp|cfm|py|pl|rb|txt|xml|json|cgi|js|css)(?:\?[^"'\s]*)?)|(?:[a-zA-Z0-9_\-][a-zA-Z0-9_\-./]*\?[^"'\s]+))["']""", re.I)
 API_RE = re.compile(r"""["'](/(?:api|v[0-9]+|graphql|rest|ajax|ws|internal)[^"'<>\s]*)["']""", re.I)
 JS_CALL_RE = re.compile(
-    r"""(?:fetch|axios\.(?:get|post|put|delete|patch)|XMLHttpRequest\.open|\.open)\s*\(\s*["']([^"']+)["']""",
+    r"""(?:fetch|axios\.(?:get|post|put|delete|patch))\s*\(\s*["']([^"']+)["']""",
+    re.I,
+)
+XHR_OPEN_RE = re.compile(
+    r"""(?:XMLHttpRequest(?:\.prototype)?\.open|\b\w+\.open)\s*\(\s*["'](?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s*["']\s*,\s*["']([^"']+)["']""",
     re.I,
 )
 JS_REDIR_RE = re.compile(r"""(?:window\.location(?:\.href)?|document\.location(?:\.href)?|location\.(?:replace|assign|href))\s*[=(]\s*["']([^"']+)["']""", re.I)
@@ -145,6 +157,33 @@ SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.I | re.S)
 STATIC_RE = re.compile(
     r"\.(?:png|jpe?g|gif|svg|css|ico|woff2?|ttf|eot|otf|mp4|webm|webp|pdf|zip|tar|gz)$",
     re.I,
+)
+
+# A conservative standard-library fallback for common compound public suffixes
+# and multi-tenant hosting suffixes. This is not a replacement for the Public Suffix List.
+COMMON_MULTI_LABEL_SUFFIXES = {
+    "ac.in", "co.in", "com.in", "firm.in", "gen.in", "ind.in", "net.in", "org.in",
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "sch.uk", "me.uk", "net.uk",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+    "co.nz", "net.nz", "org.nz", "ac.nz", "govt.nz", "school.nz",
+    "com.br", "net.br", "org.br", "com.cn", "net.cn", "org.cn", "gov.cn",
+    "com.sg", "net.sg", "org.sg", "gov.sg", "edu.sg", "com.my", "net.my", "org.my",
+    "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "com.mx", "org.mx", "gob.mx",
+    "com.tr", "net.tr", "org.tr", "com.tw", "net.tw", "org.tw", "co.kr", "or.kr",
+    "com.hk", "net.hk", "org.hk", "com.ar", "com.pl", "com.ua",
+    "co.za", "org.za", "net.za", "com.sa", "com.ng", "com.pk", "com.ph",
+    "co.id", "co.th", "co.ke", "com.bd", "com.lk", "com.co", "com.pe",
+    "github.io", "blogspot.com", "appspot.com", "pages.dev", "vercel.app",
+    "netlify.app", "herokuapp.com", "azurewebsites.net", "cloudfront.net",
+    "web.app", "firebaseapp.com", "workers.dev", "onrender.com", "fly.dev",
+    "wordpress.com", "surge.sh",
+}
+
+IPV4_OCTET_RE = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+RFC1918_IPV4_RE = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?:10\.{IPV4_OCTET_RE}\.{IPV4_OCTET_RE}\.{IPV4_OCTET_RE}|"
+    rf"172\.(?:1[6-9]|2\d|3[01])\.{IPV4_OCTET_RE}\.{IPV4_OCTET_RE}|"
+    rf"192\.168\.{IPV4_OCTET_RE}\.{IPV4_OCTET_RE})(?![A-Za-z0-9_.])"
 )
 
 SECRETS_PATTERNS = {
@@ -159,7 +198,7 @@ SECRETS_PATTERNS = {
     "Private Key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     "JWT Token": re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}"),
     "Generic Secret": re.compile(r"(?i)(?:api[_-]?key|apikey|token|secret|auth|password|passwd|pwd)['\"]?\s*[:=]\s*['\"]([a-zA-Z0-9_\-]{16,64})['\"]"),
-    "Internal IP": re.compile(r"(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})"),
+    "Internal IP": RFC1918_IPV4_RE,
     "Email Address": re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
 }
 
@@ -182,81 +221,217 @@ def default_results():
     }
 
 
-def analyze_headers(headers):
+def analyze_headers(headers, url=None):
+    """Return lightweight header observations, not proof of exploitable vulnerabilities."""
+    if not headers:
+        return []
+    headers_lower = {str(k).lower(): str(v) for k, v in headers.items()}
     issues = []
-    if not headers: return issues
-    headers_lower = {k.lower(): v for k, v in headers.items()}
-    if "strict-transport-security" not in headers_lower: issues.append("Missing HSTS")
-    if "content-security-policy" not in headers_lower: issues.append("Missing CSP")
-    if "x-frame-options" not in headers_lower: issues.append("Missing X-Frame-Options")
-    if "x-content-type-options" not in headers_lower: issues.append("Missing X-Content-Type-Options")
-    if "referrer-policy" not in headers_lower: issues.append("Missing Referrer-Policy")
-    server = headers_lower.get("server", "")
-    if server: issues.append(f"Server Disclosed: {server}")
-    powered = headers_lower.get("x-powered-by", "")
-    if powered: issues.append(f"Tech Disclosed: {powered}")
+    scheme = urlsplit(url).scheme.lower() if url else "https"
+    if scheme == "https" and "strict-transport-security" not in headers_lower:
+        issues.append("Missing HSTS (HTTPS only)")
+    csp = headers_lower.get("content-security-policy", "")
+    if not csp:
+        issues.append("Missing CSP")
+    if "x-frame-options" not in headers_lower and "frame-ancestors" not in csp.lower():
+        issues.append("Missing clickjacking protection (X-Frame-Options or CSP frame-ancestors)")
+    if "x-content-type-options" not in headers_lower:
+        issues.append("Missing X-Content-Type-Options")
+    if "referrer-policy" not in headers_lower:
+        issues.append("Missing Referrer-Policy")
+    server = headers_lower.get("server", "").strip()
+    if server:
+        issues.append(f"Informational: Server header disclosed ({server[:120]})")
+    powered = headers_lower.get("x-powered-by", "").strip()
+    if powered:
+        issues.append(f"Informational: X-Powered-By disclosed ({powered[:120]})")
     return issues
 
 
 def decode_bytes(data, content_type):
-    if not data: return ""
+    if not data:
+        return ""
     charset = "utf-8"
+    match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", str(content_type or ""), re.I)
+    if match:
+        charset = match.group(1)
     try:
-        if content_type and "charset=" in content_type:
-            charset = content_type.split("charset=")[-1].split(";")[0].strip() or "utf-8"
-        return data.decode(charset, errors="ignore")
-    except LookupError:
-        return data.decode("utf-8", errors="ignore")
+        return data.decode(charset, errors="replace")
+    except (LookupError, AttributeError):
+        return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)
+
+
+def normalize_hostname(hostname):
+    """Return a normalized hostname or raise ValueError for malformed input."""
+    hostname = str(hostname or "").strip().rstrip(".").lower()
+    if not hostname:
+        raise ValueError("Hostname is required.")
+    try:
+        host_ascii = hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError("Hostname is invalid.") from exc
+    try:
+        ipaddress.ip_address(host_ascii.strip("[]"))
+        return host_ascii
+    except ValueError:
+        pass
+    labels = host_ascii.split(".")
+    if len(host_ascii) > 253 or any(
+        not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+        for label in labels
+    ):
+        raise ValueError("Hostname is invalid.")
+    return host_ascii
+
+
+def registrable_root_domain(hostname):
+    """Best-effort root-domain estimate without an external Public Suffix List."""
+    host = normalize_hostname(hostname)
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return host
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+    last_two = ".".join(labels[-2:])
+    tld = labels[-1]
+    second_level = labels[-2]
+    # Cover common compound suffixes and the common co/com/net/org/etc pattern
+    # used by many country-code registries. Requiring three labels prevents
+    # turning a bare public suffix such as co.uk into a parent scope.
+    if last_two in COMMON_MULTI_LABEL_SUFFIXES or (
+        len(tld) == 2 and second_level in {"co", "com", "net", "org", "gov", "edu", "ac", "sch", "asn", "id"}
+    ):
+        return ".".join(labels[-3:])
+    return last_two
+
+
+def looks_like_public_suffix(hostname):
+    """Conservative guard against treating a public suffix as an authorized domain."""
+    try:
+        host = normalize_hostname(hostname)
+    except ValueError:
+        return True
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return False
+    except ValueError:
+        pass
+    labels = host.split(".")
+    if len(labels) == 1 or host in COMMON_MULTI_LABEL_SUFFIXES:
+        return True
+    return len(labels) == 2 and len(labels[-1]) == 2 and labels[0] in {
+        "co", "com", "net", "org", "gov", "edu", "ac", "sch", "asn", "id"
+    }
+
+
+def normalize_target_url(value, default_scheme="https"):
+    """Normalize a user-supplied URL and reject malformed or credentialed targets."""
+    value = (value or "").strip()
+    if not value:
+        raise ValueError("Target URL is required.")
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) and not re.match(r"^https?://", value, re.I):
+        raise ValueError("Only HTTP and HTTPS targets are supported.")
+    if not re.match(r"^https?://", value, re.I):
+        value = f"{default_scheme}://{value}"
+    try:
+        parts = urlsplit(value)
+        scheme = parts.scheme.lower()
+        hostname = parts.hostname
+        port = parts.port  # Access validates malformed/out-of-range ports.
+    except ValueError as exc:
+        raise ValueError(f"Invalid target URL: {exc}") from exc
+    if scheme not in ("http", "https") or not hostname:
+        raise ValueError("Target must be a valid HTTP or HTTPS URL with a hostname.")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("Do not embed credentials in the target URL.")
+    host_ascii = normalize_hostname(hostname)
+    authority_host = f"[{host_ascii}]" if ":" in host_ascii else host_ascii
+    default_port = 80 if scheme == "http" else 443
+    authority = authority_host + (f":{port}" if port is not None and port != default_port else "")
+    path = parts.path or "/"
+    if any(ord(ch) < 32 for ch in path) or any(ord(ch) < 32 for ch in parts.query):
+        raise ValueError("Target URL contains control characters.")
+    return urlunsplit((scheme, authority, path, parts.query, ""))
 
 
 def origin_from_url(url):
-    if not url: return "http://localhost/"
-    if not url.startswith(("http://", "https://")): url = "http://" + url
-    parts = urlsplit(url)
-    if not parts.netloc: return "http://localhost/"
-    return f"{parts.scheme}://{parts.netloc}"
+    if not url:
+        return "http://localhost/"
+    normalized = normalize_target_url(url, default_scheme="http")
+    parts = urlsplit(normalized)
+    return urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
 
 
 def path_dirs(path):
-    if not path: return []
-    if "://" in path: path = urlsplit(path).path
-    if not path.startswith("/"): path = "/" + path
+    if not path:
+        return []
+    if "://" in path:
+        path = urlsplit(path).path
+    if not path.startswith("/"):
+        path = "/" + path
     parts = [p for p in path.split("/") if p]
-    if not parts: return ["/"]
+    if not parts:
+        return ["/"]
     dirs = []
     current = ""
     for idx, part in enumerate(parts):
         current += "/" + part
         is_last = idx == len(parts) - 1
+        looks_like_file = bool(re.search(r"\.[A-Za-z0-9]{1,12}$", part)) and not part.startswith(".")
         if is_last:
-            if path.endswith("/") or "." not in part: dirs.append(current + "/")
+            if path.endswith("/") or not looks_like_file:
+                dirs.append(current + "/")
         else:
             dirs.append(current + "/")
     return list(dict.fromkeys(dirs))
 
 
 def normalize_brute_base(base, target_origin):
-    base = (base or "").strip()
-    if not base: base = "/"
-    if base.startswith(("http://", "https://")): url = base
+    """Normalize a directory base without silently treating other schemes as paths."""
+    base = str(base or "").strip()
+    if not base:
+        base = "/"
+    explicit_scheme = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", base)
+    if explicit_scheme:
+        if not re.match(r"^https?://", base, re.I):
+            raise ValueError("Only HTTP(S) brute-force base URLs are supported.")
+        url = base
     else:
-        if not base.startswith("/"): base = "/" + base
+        if not base.startswith("/"):
+            base = "/" + base
         url = urljoin(target_origin or "http://localhost/", base)
     parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("Brute-force base must be an HTTP(S) URL with a hostname.")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("Credentials are not allowed in a brute-force base URL.")
+    port = parts.port
+    hostname = normalize_hostname(parts.hostname)
+    host_text = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 80 if scheme == "http" else 443
+    netloc = host_text + (f":{port}" if port is not None and port != default_port else "")
     path = parts.path or "/"
     if not path.endswith("/"):
         last = path.rstrip("/").split("/")[-1]
-        if "." in last: path = path.rsplit("/", 1)[0] + "/"
-        else: path += "/"
-    if not path.startswith("/"): path = "/" + path
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
-
+        looks_like_file = bool(re.search(r"\.[A-Za-z0-9]{1,12}$", last)) and not last.startswith(".")
+        if looks_like_file:
+            path = path.rsplit("/", 1)[0] + "/"
+        else:
+            path += "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 def parse_status_list(text):
     out = set()
     for part in str(text).replace(";", ",").split(","):
         part = part.strip()
-        if part.isdigit(): out.add(int(part))
+        if part.isdigit() and 100 <= int(part) <= 599:
+            out.add(int(part))
     return out or {200}
 
 
@@ -275,54 +450,128 @@ def host_matches(a, b):
     return a in local_hosts and b in local_hosts
 
 
-class NoRedirectHandler(HTTPRedirectHandler):
+class TrackingRedirectHandler(HTTPRedirectHandler):
+    """Track redirects and optionally reject redirects outside a caller-defined scope."""
+    def __init__(self, follow_redirects=True, redirect_allowed=None):
+        super().__init__()
+        self.follow_redirects = follow_redirects
+        self.redirect_allowed = redirect_allowed
+        self.history = []
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+        destination = urljoin(req.full_url, newurl)
+        self.history.append({"from": req.full_url, "to": destination, "status": code})
+        if not self.follow_redirects:
+            return None
+        if self.redirect_allowed is not None:
+            try:
+                if not self.redirect_allowed(destination):
+                    return None
+            except Exception:
+                return None
+        return super().redirect_request(req, fp, code, msg, headers, destination)
 
 
-def http_request(url, user_agent, timeout=8, verify=True, max_bytes=2000000, follow_redirects=True, proxy_url=None):
-    headers = {
-        "User-Agent": user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-    req = Request(url, headers=headers)
-    context = None if verify else ssl._create_unverified_context()
-
-    handlers = []
-    if proxy_url:
-        handlers.append(ProxyHandler({'http': proxy_url, 'https': proxy_url}))
-    if not follow_redirects:
-        handlers.append(NoRedirectHandler())
-    if context is not None:
-        handlers.append(HTTPSHandler(context=context))
-    opener = build_opener(*handlers)
+def http_request(url, user_agent, timeout=8, verify=True, max_bytes=2000000,
+                 follow_redirects=True, proxy_url=None, redirect_allowed=None):
+    """Perform a bounded HTTP GET and return a stable result shape for every outcome."""
+    redirect_handler = TrackingRedirectHandler(follow_redirects, redirect_allowed)
+    try:
+        parts = urlsplit(str(url))
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            raise ValueError("Only absolute HTTP(S) URLs are supported.")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("URLs containing embedded credentials are rejected.")
+        _ = parts.port
+        timeout = float(timeout)
+        if not math.isfinite(timeout):
+            raise ValueError("Timeout must be a finite number.")
+        timeout = max(0.1, min(120.0, timeout))
+        max_bytes = max(0, min(int(max_bytes), 20_000_000))
+        safe_user_agent = str(user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36")
+        if "\r" in safe_user_agent or "\n" in safe_user_agent:
+            raise ValueError("User-Agent cannot contain newline characters.")
+        safe_user_agent = safe_user_agent[:512]
+        proxy_url = str(proxy_url or "").strip() or None
+        if proxy_url:
+            proxy_parts = urlsplit(proxy_url)
+            if proxy_parts.scheme.lower() not in ("http", "https") or not proxy_parts.hostname:
+                raise ValueError("Proxy must be an absolute HTTP(S) URL, for example http://127.0.0.1:8080.")
+            if proxy_parts.username is not None or proxy_parts.password is not None:
+                raise ValueError("Credentialed proxy URLs are not supported.")
+            _ = proxy_parts.port
+    except (TypeError, ValueError, UnicodeError) as exc:
+        return {
+            "status": 0, "final_url": str(url), "content_type": "", "location": "",
+            "body": b"", "length": 0, "bytes_read": 0, "error": str(exc),
+            "headers": {}, "redirects": list(redirect_handler.history),
+        }
 
     try:
-        resp = opener.open(req, timeout=timeout)
-        status = getattr(resp, "status", 200)
-        final_url = resp.geturl()
-        headers_dict = dict(resp.headers) if resp.headers else {}
-        content_type = headers_dict.get("Content-Type", "")
-        location = headers_dict.get("Location", "")
-        body = resp.read(max_bytes) if max_bytes else b""
-        resp.close()
-        return {"status": status, "final_url": final_url, "content_type": content_type,
-                "location": location, "body": body, "length": len(body), "headers": headers_dict}
-    except HTTPError as e:
-        body = b""
-        try: body = e.read(max_bytes)
-        except Exception: pass
-        headers_dict = dict(e.headers) if e.headers else {}
-        content_type = headers_dict.get("Content-Type", "")
-        location = headers_dict.get("Location", "")
-        return {"status": e.code, "final_url": getattr(e, "url", url), "content_type": content_type,
-                "location": location, "body": body, "length": len(body), "headers": headers_dict}
-    except Exception as e:
-        return {"status": 0, "final_url": url, "content_type": "", "location": "",
-                "body": str(e).encode(errors="ignore"), "length": 0, "error": str(e), "headers": {}}
+        headers = {
+            "User-Agent": safe_user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "close",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        req = Request(str(url), headers=headers)
+        context = None if verify else ssl._create_unverified_context()
+        handlers = []
+        if proxy_url:
+            handlers.append(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+        handlers.append(redirect_handler)
+        if context is not None:
+            handlers.append(HTTPSHandler(context=context))
+        opener = build_opener(*handlers)
+    except Exception as exc:
+        return {
+            "status": 0, "final_url": str(url), "content_type": "", "location": "",
+            "body": b"", "length": 0, "bytes_read": 0, "error": str(exc),
+            "headers": {}, "redirects": list(redirect_handler.history),
+        }
+
+    def response_result(status, final_url, response_headers, body, error=None):
+        response_headers = dict(response_headers or {})
+        lowered = {str(k).lower(): str(v) for k, v in response_headers.items()}
+        declared_length = lowered.get("content-length", "")
+        try:
+            length = max(0, int(declared_length)) if declared_length.strip() else len(body)
+        except ValueError:
+            length = len(body)
+        content_type = next((v for k, v in response_headers.items()
+                             if str(k).lower() == "content-type"), "")
+        location = next((v for k, v in response_headers.items()
+                         if str(k).lower() == "location"), "")
+        result = {
+            "status": int(status or 0), "final_url": final_url or str(url),
+            "content_type": content_type, "location": location, "body": body,
+            "length": length, "bytes_read": len(body), "headers": response_headers,
+            "redirects": list(redirect_handler.history),
+        }
+        if error:
+            result["error"] = str(error)
+        return result
+
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read(max_bytes) if max_bytes else b""
+            return response_result(getattr(resp, "status", 200), resp.geturl(), resp.headers, body)
+    except HTTPError as exc:
+        try:
+            body = exc.read(max_bytes) if max_bytes else b""
+        except Exception:
+            body = b""
+        try:
+            return response_result(exc.code, getattr(exc, "url", url), exc.headers, body)
+        finally:
+            exc.close()
+    except Exception as exc:
+        return {
+            "status": 0, "final_url": str(url), "content_type": "", "location": "",
+            "body": b"", "length": 0, "bytes_read": 0, "error": str(exc),
+            "headers": {}, "redirects": list(redirect_handler.history),
+        }
 
 
 class HTMLExtractor(HTMLParser):
@@ -369,10 +618,11 @@ class HTMLExtractor(HTMLParser):
             name = attrs_d.get("name")
             if name:
                 item = {"name": name, "type": attrs_d.get("type") or tag, "form_action": self.current_form["action"] if self.current_form else None}
+                # Keep a global input inventory as well as the form-local list.
+                # Previously, inputs inside forms were never added to results["inputs"].
+                self.inputs.append(item)
                 if self.current_form is not None:
                     self.current_form["inputs"].append({"name": name, "type": attrs_d.get("type") or tag})
-                else:
-                    self.inputs.append(item)
         elif tag in ("iframe", "frame", "embed", "object"):
             u = self._normalize(attrs_d.get("src"))
             if u: self.media.append(u)
@@ -391,67 +641,140 @@ class Crawler:
         self.app = app
         self.stop_event = threading.Event()
         self.running = False
+        self._state_lock = threading.Lock()
         self.results = default_results()
         self._seen = {}
         self.reset()
+
+    def start(self, target, opts):
+        with self._state_lock:
+            if self.running:
+                return False
+            self.running = True
+            self.stop_event.clear()
+        threading.Thread(target=self.run, args=(target, opts), daemon=True).start()
+        return True
 
     def reset(self):
         self.results = default_results()
         self._seen = {k: set() for k in ["pages", "links", "forms", "inputs", "js", "api", "params", "redirects", "robots", "sitemap", "dirs", "secrets", "sec_issues"]}
         self.bfs_queue = deque()
         self.pending = set()
+        self._attempted = set()
         self._robot_sitemaps = []
         self.allowed_hosts = set()
+        self.root_hostname = ""
+        self.root_netloc = ""
+        self.target_scheme = "https"
+        self.target_port = None
+        self.include_subdomains = False
 
     def log(self, msg):
         self.app.ui_queue.put(("log", f"[crawl] {msg}"))
 
     def clean_url(self, url):
-        try: parts = urlsplit(url)
-        except ValueError: return None
-        if parts.scheme not in ("http", "https"): return None
-        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", parts.query, ""))
+        try:
+            parts = urlsplit(str(url).strip())
+            if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+                return None
+            if parts.username is not None or parts.password is not None:
+                return None
+            hostname = normalize_hostname(parts.hostname)
+            port = parts.port
+        except (ValueError, UnicodeError, AttributeError):
+            return None
+        default_port = 80 if parts.scheme.lower() == "http" else 443
+        host_text = f"[{hostname}]" if ":" in hostname else hostname
+        netloc = host_text + (f":{port}" if port is not None and port != default_port else "")
+        return urlunsplit((parts.scheme.lower(), netloc, parts.path or "/", parts.query, ""))
 
     def in_scope(self, url):
-        try: parts = urlsplit(url)
-        except ValueError: return False
-        if parts.scheme not in ("http", "https") or not parts.hostname: return False
-        hostname = parts.hostname.lower()
-        if getattr(self, 'allowed_hosts', None):
-            for h in self.allowed_hosts:
-                h_lower = h.lower()
-                if hostname == h_lower or hostname.endswith("." + h_lower): return True
+        try:
+            parts = urlsplit(url)
+            if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+                return False
+            if parts.username is not None or parts.password is not None:
+                return False
+            hostname = normalize_hostname(parts.hostname)
+            port = parts.port
+        except (ValueError, UnicodeError, AttributeError):
+            return False
+        effective_port = port if port is not None else (80 if parts.scheme.lower() == "http" else 443)
+        if self.allowed_hosts:
+            # OSINT selections are an explicit host allowlist. On default ports,
+            # either HTTP or HTTPS can be checked; custom ports stay exact.
+            if self.target_port is not None and effective_port != self.target_port:
+                return False
+            if self.target_port is None and effective_port not in (80, 443):
+                return False
+            return hostname in self.allowed_hosts
+        target_effective_port = self.target_port
+        if target_effective_port is None:
+            target_effective_port = 80 if self.target_scheme == "http" else 443
+        if effective_port != target_effective_port:
+            return False
+        if parts.scheme.lower() != self.target_scheme:
+            return False
+        root = (self.root_hostname or "").lower()
+        if not root:
             return False
         if self.include_subdomains:
-            return hostname == self.root_hostname.lower() or hostname.endswith("." + self.root_hostname.lower())
-        return hostname == self.root_netloc.lower().split(':')[0]
+            try:
+                ipaddress.ip_address(root.strip("[]"))
+                root_is_ip = True
+            except ValueError:
+                root_is_ip = False
+            if root_is_ip or looks_like_public_suffix(root):
+                return hostname == root
+            return hostname == root or hostname.endswith("." + root)
+        return hostname == root
 
     def enqueue_url(self, url, depth):
         if self.stop_event.is_set(): return
         if self.max_depth > 0 and depth > self.max_depth: return
         url = self.clean_url(url)
-        if not url or not self.in_scope(url) or STATIC_RE.search(url): return
-        if url in self._seen["pages"] or url in self.pending: return
-        if len(self._seen["pages"]) + len(self.pending) >= self.max_pages: return
+        if not url or not self.in_scope(url): return
+        if STATIC_RE.search(urlsplit(url).path): return
+        if url in self._attempted or url in self.pending: return
+        # Bound actual unique requests, including failed requests, rather than
+        # only counting successful HTTP responses.
+        if len(self._attempted) + len(self.pending) >= self.max_pages: return
         self.pending.add(url)
         self.bfs_queue.append((url, depth))
 
-    def add_directories_from_path(self, path, source):
-        if not path or "*" in path or "$" in path: return
-        for d in path_dirs(path):
-            if d not in self._seen["dirs"]:
-                self._seen["dirs"].add(d)
-                self.results["directories"].append({"path": d, "source": source})
+    def add_directories_from_path(self, path, source, origin=None):
+        if not path or "*" in path or "$" in path:
+            return
+        base_origin = None
+        if origin:
+            try:
+                base_origin = origin_from_url(origin)
+            except ValueError:
+                base_origin = None
+        for directory in path_dirs(path):
+            full_url = urljoin(base_origin, directory) if base_origin else None
+            key = full_url or directory
+            if key not in self._seen["dirs"]:
+                self._seen["dirs"].add(key)
+                item = {"path": directory, "source": source}
+                if full_url:
+                    item["url"] = full_url
+                self.results["directories"].append(item)
 
     def add_directories_from_url(self, url, source):
-        try: path = urlsplit(url).path
-        except ValueError: return
-        self.add_directories_from_path(path, source)
+        try:
+            parts = urlsplit(url)
+            path = parts.path
+            origin = urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
+        except ValueError:
+            return
+        if self.in_scope(url):
+            self.add_directories_from_path(path, source, origin=origin)
 
     def add_page(self, url, status, final_url, depth, length, headers):
         if url in self._seen["pages"]: return
         self._seen["pages"].add(url)
-        sec_issues = analyze_headers(headers)
+        sec_issues = analyze_headers(headers, final_url or url)
         self.results["pages"].append({"url": url, "status": status, "final_url": final_url, "depth": depth, "length": length, "headers": headers, "security_issues": sec_issues})
         for issue in sec_issues:
             key = f"{url}|{issue}"
@@ -509,7 +832,8 @@ class Crawler:
         if not name: return
         try: path = urlsplit(url).path
         except ValueError: path = url
-        key = f"{name}|{path}"
+        # Preserve parameters found on distinct hosts/URLs, even when paths are identical.
+        key = f"{name}|{url}"
         if key in self._seen["params"]: return
         self._seen["params"].add(key)
         self.results["parameters"].append({"name": name, "value": value, "url": url, "path": path})
@@ -520,11 +844,21 @@ class Crawler:
         self._seen["redirects"].add(key)
         self.results["redirects"].append({"from": src, "to": dst, "status": status})
 
-    def add_robots_path(self, path):
-        if path in self._seen["robots"]: return
-        self._seen["robots"].add(path)
-        self.results["robots_paths"].append({"path": path})
-        self.add_directories_from_path(path, "robots.txt")
+    def add_robots_path(self, path, base_url=None):
+        try:
+            origin = origin_from_url(base_url) if base_url else None
+        except ValueError:
+            origin = None
+        full_url = urljoin(origin, path) if origin else None
+        key = full_url or path
+        if key in self._seen["robots"]:
+            return
+        self._seen["robots"].add(key)
+        item = {"path": path}
+        if full_url:
+            item["url"] = full_url
+        self.results["robots_paths"].append(item)
+        self.add_directories_from_path(path, "robots.txt", origin=origin)
 
     def add_sitemap_url(self, url):
         url = self.clean_url(url)
@@ -552,7 +886,7 @@ class Crawler:
             for match in pattern.finditer(text):
                 val = match.group(0)
                 if match.lastindex and match.lastindex >= 1: val = match.group(1)
-                key = f"{name}|{val}"
+                key = f"{name}|{val}|{url}"
                 if key not in self._seen["secrets"]:
                     self._seen["secrets"].add(key)
                     start = max(0, match.start() - 30)
@@ -561,8 +895,15 @@ class Crawler:
                     self.results["secrets"].append({"type": name, "value": val, "url": url, "snippet": snippet})
 
     def harvest_robots(self, base_url):
+        if self.stop_event.is_set():
+            return
         robots_url = urljoin(base_url, "/robots.txt")
-        res = http_request(robots_url, self.ua, self.timeout, self.verify, self.max_bytes, True, self.proxy_url)
+        if self.delay:
+            time.sleep(self.delay)
+        if self.stop_event.is_set():
+            return
+        res = http_request(robots_url, self.ua, self.timeout, self.verify, self.max_bytes,
+                           True, self.proxy_url, redirect_allowed=self.in_scope)
         if res["status"] == 200:
             text = decode_bytes(res["body"], res["content_type"])
             self.log(f"robots.txt found for {base_url}")
@@ -573,7 +914,7 @@ class Crawler:
                 if low.startswith("disallow:") or low.startswith("allow:"):
                     path = line.split(":", 1)[1].strip()
                     if not path or path == "*": continue
-                    self.add_robots_path(path)
+                    self.add_robots_path(path, base_url)
                     if self.opts.get("crawl_robots", False) and "*" not in path and "$" not in path:
                         self.enqueue_url(urljoin(base_url, path), 1)
                 elif low.startswith("sitemap:"):
@@ -592,7 +933,12 @@ class Crawler:
             if not surl or surl in processed or not self.in_scope(surl): continue
             processed.add(surl)
             count += 1
-            res = http_request(surl, self.ua, self.timeout, self.verify, self.max_bytes, True, self.proxy_url)
+            if self.delay:
+                time.sleep(self.delay)
+            if self.stop_event.is_set():
+                break
+            res = http_request(surl, self.ua, self.timeout, self.verify, self.max_bytes,
+                               True, self.proxy_url, redirect_allowed=self.in_scope)
             if res["status"] != 200: continue
             text = decode_bytes(res["body"], res["content_type"])
             self.add_sitemap_url(surl)
@@ -618,13 +964,13 @@ class Crawler:
         if parser.current_form is not None:
             parser.forms.append(parser.current_form)
             parser.current_form = None
-        for link in set(parser.links):
+        for link in sorted(set(parser.links)):
             self.add_link(link, "html")
             self.enqueue_url(link, depth + 1)
-        for script in set(parser.scripts):
+        for script in sorted(set(parser.scripts)):
             self.add_js(script, "html")
             if self.fetch_js: self.enqueue_url(script, depth + 1)
-        for media in set(parser.media):
+        for media in sorted(set(parser.media)):
             if not STATIC_RE.search(media): self.add_link(media, "media")
         for form in parser.forms:
             self.add_form(form)
@@ -644,6 +990,11 @@ class Crawler:
             if absolute:
                 self.add_api(absolute, f"{source_label}:call")
                 if self.visit_discovered: self.enqueue_url(absolute, depth + 1)
+        for match in XHR_OPEN_RE.findall(text)[:500]:
+            absolute = self.safe_join(source_url, match)
+            if absolute:
+                self.add_api(absolute, f"{source_label}:xhr")
+                if self.visit_discovered: self.enqueue_url(absolute, depth + 1)
         for match in URL_RE.findall(text)[:500]:
             absolute = self.safe_join(source_url, match)
             if absolute:
@@ -657,91 +1008,140 @@ class Crawler:
                 if self.visit_discovered: self.enqueue_url(absolute, depth + 1)
 
     def run(self, target, opts):
-        if self.running: return
-        self.running = True
-        self.stop_event.clear()
         self.reset()
         try:
-            self.allowed_hosts = set(opts.get("allowed_hosts", []))
-            target = target.strip()
-            if not target.startswith(("http://", "https://")): target = "https://" + target
+            target = normalize_target_url(target)
             parts = urlsplit(target)
-            if not parts.hostname: raise ValueError("Invalid target URL")
+            requested_hosts_value = opts.get("allowed_hosts", []) or []
+            requested_hosts = [requested_hosts_value] if isinstance(requested_hosts_value, str) else list(requested_hosts_value)
+            self.allowed_hosts = set()
+            target_hostname = normalize_hostname(parts.hostname or "")
+            scope_root = registrable_root_domain(target_hostname)
+            try:
+                ipaddress.ip_address(target_hostname.strip("[]"))
+                target_is_ip = True
+            except ValueError:
+                target_is_ip = False
+            for host_value in requested_hosts:
+                host_value = str(host_value).strip()
+                try:
+                    parsed_host = urlsplit(host_value if "://" in host_value else "//" + host_value)
+                    if (not parsed_host.hostname or parsed_host.username is not None or
+                            parsed_host.password is not None or parsed_host.port is not None or
+                            parsed_host.path not in ("", "/") or parsed_host.query or parsed_host.fragment):
+                        continue
+                    candidate_host = normalize_hostname(parsed_host.hostname)
+                    if candidate_host == target_hostname or (
+                        not target_is_ip and not looks_like_public_suffix(scope_root) and
+                        (candidate_host == scope_root or candidate_host.endswith("." + scope_root))
+                    ):
+                        self.allowed_hosts.add(candidate_host)
+                    else:
+                        self.log(f"Skipped selected host outside the current target's root domain: {candidate_host}")
+                except (ValueError, UnicodeError):
+                    self.log(f"Skipped invalid selected host: {host_value!r}")
+                    continue
             self.target = target
             self.opts = opts
             self.root_netloc = parts.netloc
-            self.root_hostname = parts.hostname or ""
+            self.root_hostname = target_hostname
+            self.target_scheme = parts.scheme.lower()
             self.target_port = parts.port
-            self.max_depth = int(opts.get("max_depth", 0))
-            self.max_pages = int(opts.get("max_pages", 150))
-            self.delay = max(0.0, float(opts.get("delay", 0.25)))
-            self.timeout = float(opts.get("timeout", 8))
-            self.ua = opts.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            self.max_depth = max(0, min(100, int(opts.get("max_depth", 0))))
+            self.max_pages = max(1, min(5000, int(opts.get("max_pages", 150))))
+            self.delay = max(0.0, min(30.0, float(opts.get("delay", 0.25))))
+            self.timeout = max(1.0, min(60.0, float(opts.get("timeout", 8))))
+            self.ua = str(opts.get("user_agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")[:512]
             self.verify = bool(opts.get("verify_tls", True))
             self.include_subdomains = bool(opts.get("include_subdomains", False))
             self.fetch_js = bool(opts.get("fetch_js", True))
             self.extract_js = bool(opts.get("extract_js", True))
             self.visit_discovered = bool(opts.get("visit_discovered", True))
-            self.proxy_url = opts.get("proxy_url", "").strip() or None
+            self.proxy_url = (opts.get("proxy_url") or "").strip() or None
             self.max_bytes = 2_000_000
 
-            self.log(f"Starting crawl...")
+            if requested_hosts and not self.allowed_hosts:
+                self.log("No selected hosts remain in scope for the current target. No active requests were sent.")
+                return
+
+            self.log("Starting crawl...")
             if self.proxy_url: self.log(f"Using proxy: {self.proxy_url}")
-            if self.allowed_hosts:
-                self.log(f"Active recon targeting {len(self.allowed_hosts)} specific subdomain(s).")
-                for h in self.allowed_hosts:
-                    self.add_directories_from_path("/", "target")
-                    self.enqueue_url(f"http://{h}/", 0)
-                    self.enqueue_url(f"https://{h}/", 0)
-                    if opts.get("parse_robots", True): self.harvest_robots(f"http://{h}")
-                    if opts.get("parse_sitemap", True): self.harvest_sitemaps(f"http://{h}")
+            if requested_hosts:
+                self.log(f"Active recon targeting {len(self.allowed_hosts)} explicitly selected in-scope host(s).")
+                for h in sorted(self.allowed_hosts):
+                    host_text = f"[{h}]" if ":" in h else h
+                    if self.target_port is not None:
+                        seed = f"{parts.scheme}://{host_text}:{self.target_port}/"
+                        seeds = [seed]
+                    else:
+                        seeds = [f"{parts.scheme}://{host_text}/",
+                                 f"{'http' if parts.scheme == 'https' else 'https'}://{host_text}/"]
+                    for seed in seeds:
+                        self.enqueue_url(seed, 0)
+                    self.add_directories_from_path("/", "target", origin=seeds[0])
+                    self._robot_sitemaps = []
+                    robots_base = seeds[0]
+                    if opts.get("parse_robots", True): self.harvest_robots(robots_base)
+                    if opts.get("parse_sitemap", True): self.harvest_sitemaps(robots_base)
             else:
                 self.log(f"Target: {self.target}")
-                self.add_directories_from_path("/", "target")
+                self.add_directories_from_path("/", "target", origin=self.target)
                 self.enqueue_url(self.target, 0)
                 if opts.get("parse_robots", True): self.harvest_robots(self.target)
                 if opts.get("parse_sitemap", True): self.harvest_sitemaps(self.target)
 
-            while self.bfs_queue and not self.stop_event.is_set() and len(self._seen["pages"]) < self.max_pages:
+            while self.bfs_queue and not self.stop_event.is_set() and len(self._attempted) < self.max_pages:
                 url, depth = self.bfs_queue.popleft()
                 self.pending.discard(url)
-                if url in self._seen["pages"]: continue
+                if url in self._attempted: continue
+                self._attempted.add(url)
                 if self.delay: time.sleep(self.delay)
                 self.log(f"GET {url}")
-                res = http_request(url, self.ua, self.timeout, self.verify, self.max_bytes, True, self.proxy_url)
+                res = http_request(url, self.ua, self.timeout, self.verify, self.max_bytes,
+                                   True, self.proxy_url, redirect_allowed=self.in_scope)
                 status = res["status"]
                 headers = res.get("headers", {})
                 if status == 0:
-                    err = decode_bytes(res.get("body", b""), "")[:250]
+                    err = str(res.get("error") or decode_bytes(res.get("body", b""), "No response returned."))[:250]
                     self.results["errors"].append({"url": url, "error": err})
                     continue
-                final_url = res.get("final_url", url)
+                final_url = res.get("final_url", url) or url
+                document_url = final_url if self.in_scope(final_url) else url
                 self.add_page(url, status, final_url, depth, res.get("length", 0), headers)
-                if final_url and final_url != url:
-                    self.add_redirect(url, final_url, status)
-                    if self.in_scope(final_url): self.enqueue_url(final_url, depth)
-                ctype = res.get("content_type", "").lower()
+                for redirect in res.get("redirects", []):
+                    src = self.clean_url(redirect.get("from", ""))
+                    dst = self.clean_url(redirect.get("to", ""))
+                    if src and dst:
+                        self.add_redirect(src, dst, int(redirect.get("status", status) or status))
+                ctype = str(res.get("content_type", "")).lower()
                 body = res.get("body", b"")
+                document_path = urlsplit(document_url).path.lower()
                 text = ""
-                should_decode = ("html" in ctype or "javascript" in ctype or "json" in ctype or "xml" in ctype or
-                                 url.lower().endswith((".js", ".html", ".htm", ".php", ".aspx", ".jsp", ".txt", ".xml")))
-                if should_decode: text = decode_bytes(body, ctype)
-                self.scan_secrets(url, text)
-                if "html" in ctype:
-                    self.parse_html(url, text, depth)
-                    if self.extract_js: self.extract_regex_endpoints(url, text, "html", depth)
-                elif self.extract_js and ("javascript" in ctype or url.lower().endswith(".js")):
-                    self.extract_regex_endpoints(url, text, "js", depth)
+                should_decode = (ctype.startswith("text/") or "javascript" in ctype or "json" in ctype or "xml" in ctype or
+                                 document_path.endswith((".js", ".html", ".htm", ".php", ".aspx", ".jsp", ".txt", ".xml")))
+                if should_decode:
+                    text = decode_bytes(body, ctype)
+                self.scan_secrets(document_url, text)
+                looks_like_html = "html" in ctype or document_path.endswith((".html", ".htm", ".php", ".aspx", ".jsp"))
+                if looks_like_html:
+                    self.parse_html(document_url, text, depth)
+                    if self.extract_js:
+                        self.extract_regex_endpoints(document_url, text, "html", depth)
+                elif self.extract_js and ("javascript" in ctype or document_path.endswith(".js")):
+                    self.extract_regex_endpoints(document_url, text, "js", depth)
                 elif text:
-                    self.extract_regex_endpoints(url, text, "text", depth)
+                    self.extract_regex_endpoints(document_url, text, "text", depth)
                 self.add_params_from_url(url)
+                if document_url != url:
+                    self.add_params_from_url(document_url)
 
             self.log("Crawl stopped by user." if self.stop_event.is_set() else "Crawl finished.")
         except Exception as e:
             self.log(f"Crawl fatal error: {e}")
         finally:
-            self.running = False
-            self.app.ui_queue.put(("crawl_done", None))
+            with self._state_lock:
+                self.running = False
+            self.app.ui_queue.put(("crawl_done", self.stop_event.is_set()))
 
 
 class BruteEngine:
@@ -749,122 +1149,315 @@ class BruteEngine:
         self.app = app
         self.stop_event = threading.Event()
         self.running = False
+        self._state_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
         self.results = []
         self.total_requests = 0
         self.sent_requests = 0
 
-    def log(self, msg): self.app.ui_queue.put(("log", f"[brute] {msg}"))
-    def stop(self): self.stop_event.set()
+    def log(self, msg):
+        self.app.ui_queue.put(("log", f"[brute] {msg}"))
+
+    def stop(self):
+        self.stop_event.set()
 
     def load_wordlist(self, ref):
         ref = (ref or "").strip()
-        if not ref or ref == "builtin:common": return BUILTIN_WORDLIST[:]
+        if not ref or ref == "builtin:common":
+            return BUILTIN_WORDLIST[:]
         path_value = self.app.wordlists.get(ref, ref)
-        if not path_value or path_value == "builtin:common": return BUILTIN_WORDLIST[:]
+        if not path_value or path_value == "builtin:common":
+            return BUILTIN_WORDLIST[:]
         p = Path(path_value).expanduser()
-        if not p.exists(): raise FileNotFoundError(f"Wordlist not found: {p}")
-        return [line.strip() for line in p.read_text(errors="ignore").splitlines() if line.strip() and not line.startswith("#")]
+        if not p.is_file():
+            raise FileNotFoundError(f"Wordlist not found: {p}")
+        return [line.strip() for line in p.read_text(errors="ignore").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
 
     def load_subdomain_wordlist(self, ref):
         ref = (ref or "").strip()
-        if not ref or ref == "builtin:subdomains": return SUBDOMAIN_WORDLIST[:]
+        if not ref or ref == "builtin:subdomains":
+            return SUBDOMAIN_WORDLIST[:]
         path_value = self.app.subdomain_wordlists.get(ref, ref)
-        if not path_value or path_value == "builtin:subdomains": return SUBDOMAIN_WORDLIST[:]
+        if not path_value or path_value == "builtin:subdomains":
+            return SUBDOMAIN_WORDLIST[:]
         p = Path(path_value).expanduser()
-        if not p.exists(): raise FileNotFoundError(f"Subdomain wordlist not found: {p}")
-        return [line.strip() for line in p.read_text(errors="ignore").splitlines() if line.strip() and not line.startswith("#")]
+        if not p.is_file():
+            raise FileNotFoundError(f"Subdomain wordlist not found: {p}")
+        return [line.strip() for line in p.read_text(errors="ignore").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+
+    @staticmethod
+    def _valid_word(raw, mode):
+        word = str(raw or "").strip()
+        if not word or word.startswith("#") or "://" in word:
+            return None
+        if mode == "subdomain":
+            if word.startswith(".") or word.endswith("."):
+                return None
+            labels = word.split(".")
+            if not labels or any(
+                not label or len(label) > 63 or
+                not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+                for label in labels
+            ):
+                return None
+            return word.lower() if len(word) <= 253 else None
+        word = word.lstrip("/")
+        if (not word or "\\" in word or "?" in word or "#" in word or
+                any(segment in (".", "..") for segment in word.split("/")) or
+                any(ord(c) < 32 for c in word)):
+            return None
+        return word
+
+    def _prepare_words(self, words, mode, max_items):
+        prepared = []
+        seen = set()
+        for raw in words:
+            word = self._valid_word(raw, mode)
+            if not word or word in seen:
+                continue
+            seen.add(word)
+            prepared.append(word)
+            if len(prepared) >= max_items:
+                break
+        return prepared
 
     def start(self, bases, wordlist_ref, opts, mode="directory"):
-        if self.running: return False
-        self.results = []
-        self.total_requests = 0
-        self.sent_requests = 0
+        with self._state_lock:
+            if self.running:
+                return False
+            self.running = True
+            self.stop_event.clear()
+            self.results = []
+            self.total_requests = 0
+            self.sent_requests = 0
         threading.Thread(target=self._controller, args=(bases, wordlist_ref, opts, mode), daemon=True).start()
         return True
 
-    def _controller(self, bases, wordlist_ref, opts, mode="directory"):
-        self.running = True
-        self.stop_event.clear()
+    def _normalize_subdomain_base(self, raw_base, target_origin):
+        """Return a validated domain base, restricted to the authorized target's domain."""
         try:
-            if mode == "subdomain":
-                words = self.load_subdomain_wordlist(wordlist_ref)
+            target = normalize_target_url(target_origin)
+            target_parts = urlsplit(target)
+            raw = str(raw_base or "").strip()
+            if not raw:
+                raise ValueError("Enter a base domain for subdomain discovery.")
+            candidate = raw if "://" in raw else f"{target_parts.scheme}://{raw}"
+            parts = urlsplit(candidate)
+            if parts.username is not None or parts.password is not None:
+                raise ValueError("Credentials are not allowed in a subdomain base.")
+            if parts.path not in ("", "/") or parts.query or parts.fragment:
+                raise ValueError("Subdomain brute requires a domain only, not a URL path or query.")
+            if parts.port is not None:
+                raise ValueError("Enter the domain without a port; the target's port is reused automatically.")
+            hostname = parts.hostname
+            if not hostname:
+                raise ValueError("Subdomain base must contain a valid hostname.")
+            hostname = normalize_hostname(hostname)
+            try:
+                ipaddress.ip_address(hostname.strip("[]"))
+            except ValueError:
+                pass
             else:
-                words = self.load_wordlist(wordlist_ref)
-            if not words: return
+                raise ValueError("Subdomain brute requires a DNS domain, not an IP address.")
+            target_host = normalize_hostname(target_parts.hostname or "")
+            if looks_like_public_suffix(hostname):
+                raise ValueError("Refusing to use a public suffix or single-label host as a brute-force base.")
+            root_domain = registrable_root_domain(target_host)
+            if not (hostname == target_host or hostname == root_domain or target_host.endswith("." + hostname)):
+                raise ValueError(
+                    f"Scope mismatch: {hostname} is not the target host or its parent domain ({target_host}). "
+                    "Set the main target to a host inside the domain you are authorized to assess."
+                )
+            port = target_parts.port
+            authority = hostname + (f":{port}" if port is not None else "")
+            return urlunsplit((target_parts.scheme, authority, "/", "", ""))
+        except (ValueError, UnicodeError) as exc:
+            self.log(f"Skipping subdomain base {raw_base!r}: {exc}")
+            return None
+
+    def _normalize_directory_base(self, raw_base, target_origin, opts):
+        try:
+            target = normalize_target_url(target_origin)
+            target_parts = urlsplit(target)
+            normalized = normalize_brute_base(raw_base, origin_from_url(target))
+            parts = urlsplit(normalized)
+            if parts.username is not None or parts.password is not None:
+                raise ValueError("Credentials are not allowed in a brute-force base URL.")
+            if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+                raise ValueError("Brute-force bases must be absolute HTTP(S) URLs.")
+            hostname = normalize_hostname(parts.hostname)
+            target_host = normalize_hostname(target_parts.hostname or "")
+            host_allowed = hostname == target_host
+            try:
+                ipaddress.ip_address(target_host.strip("[]"))
+                target_is_ip = True
+            except ValueError:
+                target_is_ip = False
+            if not host_allowed and opts.get("include_subdomains", False) and not target_is_ip:
+                root_domain = self.app.osint._get_root_domain(target_host)
+                if not looks_like_public_suffix(root_domain):
+                    host_allowed = hostname == root_domain or hostname.endswith("." + root_domain)
+            if not host_allowed:
+                self.log(f"Skipping out-of-scope base: {normalized}")
+                return None
+            try:
+                port = parts.port
+                target_port = target_parts.port
+            except ValueError:
+                return None
+            if parts.scheme.lower() != target_parts.scheme.lower():
+                self.log(f"Skipping base with a different scheme from the configured target: {normalized}")
+                return None
+            candidate_effective_port = port if port is not None else (80 if parts.scheme.lower() == "http" else 443)
+            target_effective_port = target_port if target_port is not None else (80 if target_parts.scheme.lower() == "http" else 443)
+            if candidate_effective_port != target_effective_port:
+                self.log(f"Skipping base on a different port: {normalized}")
+                return None
+            return normalized
+        except (ValueError, UnicodeError) as exc:
+            self.log(f"Skipping invalid brute base {raw_base!r}: {exc}")
+            return None
+
+    def _controller(self, bases, wordlist_ref, opts, mode="directory"):
+        try:
+            words = (self.load_subdomain_wordlist(wordlist_ref) if mode == "subdomain"
+                     else self.load_wordlist(wordlist_ref))
+            if not words:
+                self.log("No usable wordlist entries were found.")
+                return
             target_origin = opts.get("target_origin") or "http://localhost/"
-            target_host = urlsplit(target_origin).hostname
+            try:
+                max_items = max(1, min(100000, int(opts.get("max_per_dir", 500))))
+                target_origin = normalize_target_url(target_origin)
+            except ValueError as exc:
+                self.log(f"Invalid brute options: {exc}")
+                return
+            prepared_words = self._prepare_words(words, mode, max_items)
+            if not prepared_words:
+                self.log("No valid, unique wordlist entries remain after validation.")
+                return
+
             normalized = []
             seen = set()
             for base in bases:
-                nb = normalize_brute_base(base, target_origin)
-                if not nb: continue
-                base_host = urlsplit(nb).hostname
-                if target_host and not host_matches(base_host, target_host): continue
-                if nb not in seen:
+                nb = (self._normalize_subdomain_base(base, target_origin) if mode == "subdomain"
+                      else self._normalize_directory_base(base, target_origin, opts))
+                if nb and nb not in seen:
                     seen.add(nb)
                     normalized.append(nb)
-            if not normalized: return
-            mode_opt = opts.get("mode", "sequential")
-            self.total_requests = len(normalized) * len(words)
-            self.log(f"Brute starting: {len(normalized)} base(s), {len(words)} words, mode={mode_opt}, total={self.total_requests}")
-            if mode_opt == "sequential":
-                for base in normalized:
-                    if self.stop_event.is_set(): break
-                    self._brute_base(base, words, opts, mode)
-            else:
-                max_workers = max(1, min(int(opts.get("threads", 5)), len(normalized), 50))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for fut in [executor.submit(self._brute_base, base, words, opts, mode) for base in normalized]:
-                        try: fut.result()
-                        except Exception as e: self.log(f"Brute worker error: {e}")
-            self.log("Brute finished.")
+            if not normalized:
+                self.log("No in-scope bases to scan. Check the target and selected bases.")
+                return
+
+            self.total_requests = len(normalized) * len(prepared_words)
+            self.log(f"Brute starting: {len(normalized)} base(s), {len(prepared_words)} unique words, "
+                     f"mode={opts.get('mode', 'sequential')}, total={self.total_requests}")
+            for base in normalized:
+                if self.stop_event.is_set():
+                    break
+                self._brute_base(base, prepared_words, opts, mode)
+            self.log("Brute stopped by user." if self.stop_event.is_set() else "Brute finished.")
         except Exception as e:
             self.log(f"Brute error: {e}")
         finally:
-            self.running = False
-            self.app.ui_queue.put(("brute_done", None))
+            with self._state_lock:
+                self.running = False
+            self.app.ui_queue.put(("brute_done", self.stop_event.is_set()))
 
-    def _brute_base(self, base, words, opts, mode="directory"):
+    def _probe_word(self, base, word, opts, mode):
+        if self.stop_event.is_set():
+            return
         delay = max(0.0, float(opts.get("delay", 0.2)))
-        max_items = max(1, int(opts.get("max_per_dir", 500)))
-        interesting = opts.get("interesting_statuses", {200})
         timeout = float(opts.get("timeout", 8))
         ua = opts.get("user_agent", f"{APP_NAME}/1.0")
         verify = bool(opts.get("verify_tls", True))
+        interesting = opts.get("interesting_statuses", {200})
         log_all = bool(opts.get("log_all", False))
-        proxy_url = opts.get("proxy_url", "").strip() or None
-        count = 0
-        seen_words = set()
-        self.log(f"Bruting {base}")
-        for raw in words:
-            if self.stop_event.is_set() or count >= max_items: break
-            word = raw.strip()
-            if not word or word.startswith("#") or "://" in word: continue
-            word = word.lstrip("/")
-            if word in seen_words: continue
-            seen_words.add(word)
-            count += 1
+        proxy_url = (opts.get("proxy_url") or "").strip() or None
+        if delay:
+            time.sleep(delay)
+        if self.stop_event.is_set():
+            return
+
+        if mode == "subdomain":
+            base_parts = urlsplit(base)
+            candidate_host = f"{word}.{base_parts.hostname}"
+            port = base_parts.port
+            authority = f"[{candidate_host}]" if ":" in candidate_host else candidate_host
+            if port is not None:
+                authority += f":{port}"
+            url = urlunsplit((base_parts.scheme, authority, "/", "", ""))
+        else:
+            url = urljoin(base, word)
+            # A malformed word must not turn a path check into a cross-origin request.
+            base_parts = urlsplit(base)
+            check_parts = urlsplit(url)
+            if (check_parts.scheme, check_parts.hostname, check_parts.port) != (
+                base_parts.scheme, base_parts.hostname, base_parts.port
+            ):
+                self.log(f"Skipped word that changed origin: {word!r}")
+                return
+
+        with self._counter_lock:
             self.sent_requests += 1
-            self.app.ui_queue.put(("brute_progress", (self.sent_requests, self.total_requests)))
-            if delay: time.sleep(delay)
-            if mode == "subdomain":
-                # Subdomain brute: word.domain.com
-                base_parsed = urlsplit(base)
-                subdomain_url = f"{base_parsed.scheme}://{word}.{base_parsed.netloc}/"
-                res = http_request(subdomain_url, ua, timeout=timeout, verify=verify, max_bytes=4096, follow_redirects=False, proxy_url=proxy_url)
-            else:
-                url = urljoin(base, word)
-                res = http_request(url, ua, timeout=timeout, verify=verify, max_bytes=4096, follow_redirects=False, proxy_url=proxy_url)
-            status = res.get("status", 0)
-            length = res.get("length", 0)
-            location = res.get("location", "")
-            note = "interesting" if status in interesting else "error" if status == 0 else "redirect" if 300 <= status < 400 else ""
-            if log_all or note:
-                extra = f" -> {location}" if location and note in ("redirect", "interesting") else ""
-                result_data = {"time": datetime.now().strftime("%H:%M:%S"), "base": base, "url": url if mode == "directory" else f"{word}.{base_parsed.netloc}/", "status": status, "length": length, "note": note + extra}
+            sent = self.sent_requests
+            total = self.total_requests
+        self.app.ui_queue.put(("brute_progress", (sent, total)))
+        res = http_request(url, ua, timeout=timeout, verify=verify, max_bytes=4096,
+                           follow_redirects=False, proxy_url=proxy_url)
+        status = res.get("status", 0)
+        length = res.get("length", 0)
+        location = res.get("location", "")
+        note = "interesting" if status in interesting else "error" if status == 0 else "redirect" if 300 <= status < 400 else ""
+        if log_all or note:
+            extra = f" -> {location}" if location and note in ("redirect", "interesting") else ""
+            result_data = {
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "base": base,
+                "url": url,
+                "status": status,
+                "length": length,
+                "note": note + extra,
+            }
+            with self._counter_lock:
                 self.results.append(result_data)
-                self.app.ui_queue.put(("brute_result", result_data))
-        self.log(f"Completed {base}: {count} requests")
+            self.app.ui_queue.put(("brute_result", result_data))
+
+    def _brute_base(self, base, words, opts, mode="directory"):
+        self.log(f"Bruting {base}")
+        starting_sent = self.sent_requests
+        mode_opt = opts.get("mode", "sequential")
+        if mode_opt == "parallel" and len(words) > 1:
+            workers = max(1, min(int(opts.get("threads", 5)), len(words), 50))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                # Submit bounded batches rather than creating tens of thousands
+                # of Future objects at once for a large custom wordlist.
+                batch_size = max(workers, workers * 4)
+                for offset in range(0, len(words), batch_size):
+                    if self.stop_event.is_set():
+                        break
+                    batch = words[offset:offset + batch_size]
+                    futures = [executor.submit(self._probe_word, base, word, opts, mode) for word in batch]
+                    for future in futures:
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            self.log(f"Probe worker error for {base}: {exc}")
+        else:
+            for word in words:
+                if self.stop_event.is_set():
+                    break
+                try:
+                    self._probe_word(base, word, opts, mode)
+                except Exception as exc:
+                    self.log(f"Probe error for {base}/{word}: {exc}")
+        sent_here = self.sent_requests - starting_sent
+        if self.stop_event.is_set():
+            self.log(f"Stopped {base}: {sent_here}/{len(words)} candidate request(s) sent")
+        else:
+            self.log(f"Completed {base}: {sent_here} request(s) sent")
 
 
 class OSINTEngine:
@@ -872,6 +1465,7 @@ class OSINTEngine:
         self.app = app
         self.stop_event = threading.Event()
         self.running = False
+        self._state_lock = threading.Lock()
         self.proxy_url = None
         self.verify = True
 
@@ -879,27 +1473,36 @@ class OSINTEngine:
     def stop(self): self.stop_event.set()
 
     def start(self, target_url, opts):
-        if self.running: return
-        self.stop_event.clear()
-        self.proxy_url = opts.get("proxy_url")
-        self.verify = opts.get("verify_tls", True)
+        with self._state_lock:
+            if self.running:
+                return False
+            self.running = True
+            self.stop_event.clear()
+            self.proxy_url = opts.get("proxy_url")
+            self.verify = opts.get("verify_tls", True)
         threading.Thread(target=self._run, args=(target_url, opts), daemon=True).start()
+        return True
 
     def _get_root_domain(self, host):
-        parts = host.split('.')
-        if len(parts) > 2 and parts[-2] in ('co', 'com', 'net', 'org', 'gov', 'edu', 'ac') and len(parts) > 3:
-            return '.'.join(parts[-3:])
-        return '.'.join(parts[-2:])
+        return registrable_root_domain(host)
 
     def _is_valid_osint_url(self, url, target_host, root_domain):
         try:
-            if not url.startswith("http"): return False
             p = urlsplit(url)
+            if p.scheme.lower() not in ("http", "https") or p.username is not None or p.password is not None:
+                return False
             host = p.hostname
             if not host: return False
-            host = host.lower()
-            target_host = target_host.lower()
-            root_domain = root_domain.lower()
+            host = normalize_hostname(host)
+            target_host = normalize_hostname(target_host)
+            root_domain = normalize_hostname(root_domain)
+            if looks_like_public_suffix(root_domain):
+                return host == target_host
+            try:
+                ipaddress.ip_address(root_domain.strip("[]"))
+                return host == target_host or host == root_domain
+            except ValueError:
+                pass
             if host == target_host or host == root_domain: return True
             if host.endswith("." + root_domain): return True
             return False
@@ -907,106 +1510,158 @@ class OSINTEngine:
             return False
 
     def _fetch_crtsh(self, domain, found_urls):
+        if self.stop_event.is_set():
+            return
         self.log("Querying crt.sh (Certificate Transparency)...")
-        url = f"https://crt.sh/?q=%25.{domain}&output=json"
-        cj = http.cookiejar.CookieJar()
-        context = None if self.verify else ssl._create_unverified_context()
-        handlers = []
-        if self.proxy_url: handlers.append(ProxyHandler({'http': self.proxy_url, 'https': self.proxy_url}))
-        handlers.append(HTTPCookieProcessor(cj))
-        handlers.append(HTTPSHandler(context=context))
-        opener = build_opener(*handlers)
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        query = urllib.parse.urlencode({"q": f"%.{domain}", "output": "json"})
+        url = f"https://crt.sh/?{query}"
+        response = http_request(
+            url, "ReconWeave/1.0 (authorized security research)", timeout=20,
+            verify=self.verify, max_bytes=5_000_000, proxy_url=self.proxy_url,
+        )
+        if response.get("status") != 200:
+            self.log(f"crt.sh request failed with status {response.get('status', 0)}.")
+            return
         try:
-            resp = opener.open(req, timeout=20)
-            text = resp.read(5000000).decode('utf-8', errors='ignore')
-            if text.strip().startswith("["):
-                data = json.loads(text)
-                for entry in data:
-                    names = entry.get("name_value", "")
-                    for n in names.split("\n"):
-                        n = n.strip().lower().replace("*.", "")
-                        if n and not n.startswith("*"):
-                            found_urls[f"http://{n}"] = "crt.sh"
-        except Exception as e:
-            self.log(f"crt.sh parse error: {e}")
+            data = json.loads(decode_bytes(response.get("body", b""), response.get("content_type", "")))
+            if not isinstance(data, list):
+                self.log("crt.sh returned an unexpected response format.")
+                return
+            for entry in data:
+                if self.stop_event.is_set():
+                    break
+                if not isinstance(entry, dict):
+                    continue
+                names = str(entry.get("name_value", ""))
+                for raw_name in names.splitlines():
+                    raw_name = raw_name.strip()
+                    if raw_name.startswith("*."):
+                        raw_name = raw_name[2:]
+                    try:
+                        name = normalize_hostname(raw_name)
+                    except ValueError:
+                        continue
+                    found_urls.setdefault(f"https://{name}/", "crt.sh")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            self.log(f"crt.sh response parse error: {exc}")
 
     def _fetch_wayback(self, target_host, root_domain, found_urls):
+        if self.stop_event.is_set():
+            return
         self.log("Querying Wayback Machine (CDX API)...")
-        urls_to_query = [
-            f"http://web.archive.org/cdx/search/cdx?url=*.{root_domain}/*&output=json&fl=original&collapse=urlkey&limit=5000",
-            f"http://web.archive.org/cdx/search/cdx?url={target_host}/*&output=json&fl=original&collapse=urlkey&limit=5000"
-        ]
-        cj = http.cookiejar.CookieJar()
-        context = None if self.verify else ssl._create_unverified_context()
-        handlers = []
-        if self.proxy_url: handlers.append(ProxyHandler({'http': self.proxy_url, 'https': self.proxy_url}))
-        handlers.append(HTTPCookieProcessor(cj))
-        handlers.append(HTTPSHandler(context=context))
-        opener = build_opener(*handlers)
-        for q_url in urls_to_query:
-            if self.stop_event.is_set(): break
-            req = Request(q_url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            ipaddress.ip_address(target_host.strip("[]"))
+            is_ip_target = True
+        except ValueError:
+            is_ip_target = False
+        if is_ip_target or looks_like_public_suffix(root_domain):
+            patterns = [f"{target_host}/*"]
+        else:
+            patterns = [f"*.{root_domain}/*", f"{target_host}/*"]
+        seen_queries = set()
+        for pattern in patterns:
+            if self.stop_event.is_set():
+                break
+            if pattern in seen_queries:
+                continue
+            seen_queries.add(pattern)
+            params = urllib.parse.urlencode({
+                "url": pattern, "output": "json", "fl": "original",
+                "collapse": "urlkey", "limit": "5000",
+            })
+            query_url = f"https://web.archive.org/cdx/search/cdx?{params}"
+            response = http_request(
+                query_url, "ReconWeave/1.0 (authorized security research)", timeout=30,
+                verify=self.verify, max_bytes=10_000_000, proxy_url=self.proxy_url,
+            )
+            if response.get("status") != 200:
+                self.log(f"Wayback query failed with status {response.get('status', 0)}.")
+                continue
             try:
-                resp = opener.open(req, timeout=30)
-                text = resp.read(10000000).decode('utf-8', errors='ignore')
-                if text.strip().startswith("["):
-                    data = json.loads(text)
-                    for row in data[1:]:
-                        if row and len(row) > 0:
-                            found_urls[row[0]] = "wayback"
-            except Exception:
-                pass
+                data = json.loads(decode_bytes(response.get("body", b""), response.get("content_type", "")))
+                if not isinstance(data, list):
+                    continue
+                # CDX JSON normally starts with a header row. Also tolerate an
+                # API response without that row rather than silently discarding it.
+                rows = data[1:] if data and data[0] == ["original"] else data
+                for row in rows:
+                    if self.stop_event.is_set():
+                        break
+                    if isinstance(row, list) and row and isinstance(row[0], str):
+                        found_urls.setdefault(row[0], "wayback")
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                self.log(f"Wayback response parse error: {exc}")
 
     def _fetch_ddg(self, target_host, root_domain, found_urls):
         self.log("Querying DuckDuckGo (via ddgs library)...")
         if not DDGS_AVAILABLE:
-            self.log("DDG Error: 'duckduckgo-search' library not found. Run: pip install duckduckgo-search")
+            self.log("DDG disabled: install the optional package with `python -m pip install ddgs`.")
             return
         try:
-            with DDGS() as ddgs:
+            with DDGS(proxy=self.proxy_url or None, timeout=20, verify=self.verify) as ddgs:
                 results = ddgs.text(f"site:{root_domain}", max_results=200)
                 count = 0
                 for r in results:
-                    url = r.get("href")
+                    if self.stop_event.is_set():
+                        break
+                    url = r.get("href") or r.get("url")
                     if url:
-                        found_urls[url] = "ddg"
+                        found_urls.setdefault(url, "ddg")
                         count += 1
                 self.log(f"DDG: Found {count} raw URLs.")
         except Exception as e:
             self.log(f"DDG library error: {e}")
 
     def _run(self, target_url, opts):
-        self.running = True
+        valid_items = []
         try:
+            target_url = normalize_target_url(target_url)
             parsed = urlsplit(target_url)
             target_host = parsed.hostname
-            if not target_host: return
+            if not target_host:
+                raise ValueError("Target URL does not contain a valid hostname.")
+            target_host = normalize_hostname(target_host)
             root_domain = self._get_root_domain(target_host)
-            self.log(f"Target Host: {target_host} | Root Domain: {root_domain}")
+            try:
+                ipaddress.ip_address(target_host.strip("[]"))
+                is_ip_target = True
+            except ValueError:
+                is_ip_target = False
+            self.log(f"Target Host: {target_host} | Estimated Root Domain: {root_domain}")
             engines = []
-            if opts.get("crtsh"): engines.append(("crt.sh", self._fetch_crtsh, (root_domain,)))
-            if opts.get("wayback"): engines.append(("Wayback", self._fetch_wayback, (target_host, root_domain)))
-            if opts.get("ddg"): engines.append(("DuckDuckGo", self._fetch_ddg, (target_host, root_domain)))
-            total = len(engines)
+            if opts.get("crtsh") and not is_ip_target and not looks_like_public_suffix(root_domain):
+                engines.append(("crt.sh", self._fetch_crtsh, (root_domain,)))
+            elif opts.get("crtsh"):
+                self.log("crt.sh was skipped because the input is an IP address or looks like a public suffix rather than a registrable domain.")
+            if opts.get("wayback"):
+                engines.append(("Wayback", self._fetch_wayback, (target_host, root_domain)))
+            if opts.get("ddg") and not is_ip_target and not looks_like_public_suffix(root_domain):
+                engines.append(("DuckDuckGo", self._fetch_ddg, (target_host, root_domain)))
+            elif opts.get("ddg"):
+                self.log("DuckDuckGo domain search was skipped because the input is an IP address or looks like a public suffix.")
             found_urls = {}
+            total = len(engines)
             for i, (name, func, args) in enumerate(engines):
-                if self.stop_event.is_set(): break
+                if self.stop_event.is_set():
+                    break
                 self.app.ui_queue.put(("osint_progress", (i, total, f"Querying {name}...")))
                 func(*args, found_urls)
             self.app.ui_queue.put(("osint_progress", (total, total, "Validating strict matches...")))
             self.log(f"Raw OSINT found: {len(found_urls)} URLs. Validating strictly...")
-            valid_items = []
-            for u, src in found_urls.items():
-                if self.stop_event.is_set(): break
-                if self._is_valid_osint_url(u, target_host, root_domain):
-                    valid_items.append((u, src))
+            for url, source in found_urls.items():
+                if self.stop_event.is_set():
+                    break
+                if self._is_valid_osint_url(url, target_host, root_domain):
+                    valid_items.append((url, source))
             self.log(f"Validated {len(valid_items)} strict matches.")
-            self.app.ui_queue.put(("osint_done", valid_items))
-        except Exception as e:
-            self.log(f"OSINT Error: {e}")
+            if self.stop_event.is_set():
+                self.log("OSINT stopped by user.")
+        except Exception as exc:
+            self.log(f"OSINT Error: {exc}")
         finally:
-            self.running = False
+            with self._state_lock:
+                self.running = False
+            self.app.ui_queue.put(("osint_done", valid_items))
 
 
 class ReconWeaveApp:
@@ -1022,6 +1677,9 @@ class ReconWeaveApp:
 
         self.target_var = tk.StringVar(value="http://127.0.0.1:8000")
         self.auth_var = tk.BooleanVar(value=False)
+        # Authorization confirmation belongs to one target entry. Editing the
+        # target invalidates the previous confirmation automatically.
+        self.target_var.trace_add("write", lambda *_: self.auth_var.set(False))
         self.proxy_var = tk.StringVar(value="")
         self.max_depth_var = tk.StringVar(value="0")
         self.max_pages_var = tk.StringVar(value="150")
@@ -1382,6 +2040,12 @@ class ReconWeaveApp:
         self.log_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     def show_subdomain_crawl_dialog(self):
+        if not self.auth_var.get():
+            messagebox.showerror(APP_NAME, "Confirm written authorization in Target Configuration before active crawling.")
+            return
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "A crawl is already running.")
+            return
         if not self.osint_structured:
             messagebox.showinfo(APP_NAME, "No passive recon data found.\n\nPlease go to the 'OSINT & Dorking' tab and run a discovery first.")
             return
@@ -1435,19 +2099,30 @@ class ReconWeaveApp:
         ttk.Button(btn_frame, text="Select None", command=select_none).pack(side="left", padx=5)
 
         def start_crawl_selected():
+            if not self.auth_var.get():
+                messagebox.showerror(APP_NAME, "Written authorization confirmation is required.")
+                return
+            if self.crawler.running:
+                messagebox.showinfo(APP_NAME, "A crawl is already running.")
+                return
             selected = [h for h, v in vars_dict.items() if v.get()]
             if not selected:
                 messagebox.showerror(APP_NAME, "Please select at least one subdomain.")
                 return
-            base_target = self.target_var.get().strip()
-            if not base_target.startswith("http"): base_target = "https://" + base_target
-            opts = self._crawl_opts()
+            try:
+                base_target = normalize_target_url(self.target_var.get())
+                opts = self._crawl_opts()
+            except ValueError as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+                return
             opts["allowed_hosts"] = selected
+            if not self.crawler.start(base_target, opts):
+                messagebox.showinfo(APP_NAME, "A crawl is already running.")
+                return
             dialog.destroy()
             self.crawl_start_btn.config(state="disabled")
             self.crawl_stop_btn.config(state="normal")
-            self.status_var.set(f"Crawling {len(selected)} subdomains...")
-            threading.Thread(target=self.crawler.run, args=(base_target, opts), daemon=True).start()
+            self.status_var.set(f"Crawling {len(selected)} explicitly selected hosts...")
 
         ttk.Button(btn_frame, text="▶ Start Active Crawl", command=start_crawl_selected).pack(side="right", padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="right", padx=5)
@@ -1659,6 +2334,12 @@ class ReconWeaveApp:
         self.osint_dirs_tree.bind("<Button-3>", self.on_osint_dirs_right_click)
 
     def crawl_selected_osint(self):
+        if not self.auth_var.get():
+            messagebox.showerror(APP_NAME, "Confirm written authorization in Target Configuration before active crawling.")
+            return
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "A crawl is already running.")
+            return
         selected_hosts = self.osint_hosts_tree.selection()
         if not selected_hosts:
             messagebox.showinfo(APP_NAME, "Please select one or more subdomains from the list first.")
@@ -1672,18 +2353,21 @@ class ReconWeaveApp:
         if not messagebox.askyesno("Active Recon Warning", msg, icon="warning"):
             return
 
-        base_target = self.target_var.get().strip()
-        if not base_target.startswith("http"): base_target = "https://" + base_target
-
-        opts = self._crawl_opts()
+        try:
+            base_target = normalize_target_url(self.target_var.get())
+            opts = self._crawl_opts()
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
         opts["allowed_hosts"] = list(selected_hosts)
+        if not self.crawler.start(base_target, opts):
+            messagebox.showinfo(APP_NAME, "A crawl is already running.")
+            return
 
         self.crawl_start_btn.config(state="disabled")
         self.crawl_stop_btn.config(state="normal")
-        self.status_var.set(f"Crawling {len(selected_hosts)} subdomains...")
-
+        self.status_var.set(f"Crawling {len(selected_hosts)} explicitly selected hosts...")
         self.notebook.select(self.tab_crawl)
-        threading.Thread(target=self.crawler.run, args=(base_target, opts), daemon=True).start()
 
     def apply_osint_filters(self, *args):
         search_term = self.osint_search_var.get().strip().lower()
@@ -1692,13 +2376,15 @@ class ReconWeaveApp:
 
         structured = {}
         target_host = ""
-        try: target_host = urlsplit(self.target_var.get().strip()).hostname or ""
-        except: pass
+        try:
+            target_host = normalize_hostname(urlsplit(normalize_target_url(self.target_var.get())).hostname or "")
+        except (ValueError, TypeError):
+            target_host = ""
 
         for url, src in self.osint_raw_data:
             try:
                 p = urlsplit(url)
-                host = p.hostname or ""
+                host = normalize_hostname(p.hostname or "")
                 path = p.path or "/"
                 if not host: continue
                 if host not in structured:
@@ -1741,9 +2427,17 @@ class ReconWeaveApp:
         if not self.auth_var.get():
             messagebox.showerror(APP_NAME, "You must confirm authorization for the target.")
             return
-        target = self.target_var.get().strip()
-        if not target:
-            messagebox.showerror(APP_NAME, "Target URL is required.")
+        if self.osint.running:
+            messagebox.showinfo(APP_NAME, "OSINT discovery is already running.")
+            return
+        try:
+            target = normalize_target_url(self.target_var.get())
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
+            return
+
+        if not any((self.osint_crtsh_var.get(), self.osint_wayback_var.get(), self.osint_ddg_var.get())):
+            messagebox.showerror(APP_NAME, "Select at least one passive OSINT engine.")
             return
 
         opts = {
@@ -1752,17 +2446,22 @@ class ReconWeaveApp:
             "verify_tls": self.verify_tls_var.get()
         }
 
+        if not self.osint.start(target, opts):
+            messagebox.showinfo(APP_NAME, "OSINT discovery is already running.")
+            return
         self.osint_start_btn.config(state="disabled")
         self.osint_stop_btn.config(state="normal")
         self.osint_progress_bar['value'] = 0
         self.status_var.set("Running OSINT...")
-        self.osint.start(target, opts)
 
     def stop_osint(self):
         self.osint.stop()
         self.status_var.set("Stopping OSINT...")
 
     def clear_osint(self):
+        if self.osint.running:
+            messagebox.showinfo(APP_NAME, "Stop OSINT discovery before clearing its results.")
+            return
         self.osint_raw_data = []
         self.osint_structured = {}
         self.osint_hosts_tree.delete(*self.osint_hosts_tree.get_children())
@@ -1794,27 +2493,49 @@ class ReconWeaveApp:
 
     def start_subdomain_brute(self):
         if not self.auth_var.get():
-            messagebox.showerror(APP_NAME, "You must confirm authorization for the target.")
+            messagebox.showerror(APP_NAME, "You must confirm written authorization for the target.")
             return
-
+        if self.bruter.running:
+            messagebox.showinfo(APP_NAME, "Brute engine already running.")
+            return
         target_domain = self.subdomain_target_var.get().strip()
         if not target_domain:
             messagebox.showerror(APP_NAME, "Please enter a target domain for subdomain brute.")
             return
-
-        if self.bruter.running:
+        try:
+            opts = self._brute_opts()
+            validated_base = self.bruter._normalize_subdomain_base(target_domain, opts["target_origin"])
+            if not validated_base:
+                messagebox.showerror(APP_NAME, "The subdomain base is outside the configured target scope or is invalid. Check the log for details.")
+                return
+            word_count = len(self.bruter._prepare_words(
+                self.bruter.load_subdomain_wordlist(self.subdomain_wordlist_var.get()),
+                "subdomain", max(1, min(100000, int(opts.get("max_per_dir", 500))))
+            ))
+        except (ValueError, OSError) as exc:
+            messagebox.showerror(APP_NAME, f"Invalid subdomain brute configuration: {exc}")
+            return
+        if word_count == 0:
+            messagebox.showerror(APP_NAME, "The selected wordlist has no valid DNS labels.")
+            return
+        if not messagebox.askokcancel(
+            "Active Subdomain Discovery",
+            f"This will send up to {word_count} HTTP(S) requests to candidate subdomains of {urlsplit(validated_base).hostname}.\n\n"
+            "Only continue for a domain covered by your written authorization."
+        ):
+            return
+        if not self.bruter.start([validated_base], self.subdomain_wordlist_var.get(), opts, mode="subdomain"):
             messagebox.showinfo(APP_NAME, "Brute engine already running.")
             return
-
-        opts = self._brute_opts()
-        self.bruter.start([target_domain], self.subdomain_wordlist_var.get(), opts, mode="subdomain")
-
         self.brute_start_selected_btn.config(state="disabled")
         self.brute_start_all_btn.config(state="disabled")
         self.brute_stop_btn.config(state="normal")
         self.status_var.set("Subdomain brute started...")
 
     def export_brute_results(self):
+        if self.bruter.running:
+            messagebox.showinfo(APP_NAME, "Stop the brute session before exporting a consistent snapshot.")
+            return
         if not self.bruter.results:
             messagebox.showinfo(APP_NAME, "No brute results to export.")
             return
@@ -1870,11 +2591,17 @@ class ReconWeaveApp:
             self.secrets_tree.insert("", "end", values=(item.get("type", ""), item.get("value", ""), item.get("url", ""), item.get("snippet", "")))
 
     def clear_secrets(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before clearing secret findings.")
+            return
         self.crawler.results["secrets"] = []
         self.crawler._seen["secrets"] = set()
         self.refresh_secrets()
 
     def export_secrets(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before exporting a consistent secret snapshot.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], initialfile="reconweave_secrets.json")
         if not path: return
         try:
@@ -2421,20 +3148,20 @@ class ReconWeaveApp:
                     self.refresh_secrets()
                     self.crawl_start_btn.config(state="normal")
                     self.crawl_stop_btn.config(state="disabled")
-                    self.status_var.set("Crawl finished.")
+                    self.status_var.set("Crawl stopped." if payload else "Crawl finished.")
                 elif kind == "brute_result":
                     self.brute_tree.insert("", 0, values=(payload.get("time", ""), payload.get("base", ""), payload.get("url", ""), payload.get("status", ""), payload.get("length", ""), payload.get("note", "")))
                 elif kind == "brute_progress":
                     sent, total = payload
                     self.brute_progress_var.set(f"{sent} / {total} requests sent")
                     if total > 0:
-                        self.brute_progress_bar['value'] = (sent / total) * 100
+                        self.brute_progress_bar['value'] = min(100.0, (sent / total) * 100)
                 elif kind == "brute_done":
                     self.brute_start_selected_btn.config(state="normal")
                     self.brute_start_all_btn.config(state="normal")
                     self.brute_stop_btn.config(state="disabled")
                     self.refresh_diagram()
-                    self.status_var.set("Brute finished.")
+                    self.status_var.set("Brute stopped." if payload else "Brute finished.")
                 elif kind == "osint_progress":
                     current, total, msg = payload
                     if hasattr(self, 'osint_progress_bar'):
@@ -2447,9 +3174,23 @@ class ReconWeaveApp:
                     self.osint_start_btn.config(state="normal")
                     self.osint_stop_btn.config(state="disabled")
                     self.refresh_diagram()
-                    self.status_var.set("OSINT finished.")
-        except queue.Empty: pass
-        self.root.after(120, self.process_queue)
+                    self.status_var.set("OSINT stopped." if self.osint.stop_event.is_set() else "OSINT finished.")
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            # The application may be closing while a queued UI update is processed.
+            return
+        except Exception as exc:
+            # A single malformed UI event must not permanently stop queue polling.
+            try:
+                self.log_text.insert("end", f"{datetime.now():%H:%M:%S} [ui] Queue handler error: {exc}\n")
+                self.log_text.see("end")
+            except tk.TclError:
+                return
+        try:
+            self.root.after(120, self.process_queue)
+        except tk.TclError:
+            pass
 
     def _crawl_opts(self):
         try:
@@ -2482,20 +3223,19 @@ class ReconWeaveApp:
             messagebox.showinfo(APP_NAME, "Crawl already running.")
             return
 
-        target = self.target_var.get().strip()
-        if not target:
-            messagebox.showerror(APP_NAME, "Target URL is required.")
+        try:
+            target = normalize_target_url(self.target_var.get())
+            opts = self._crawl_opts()
+        except ValueError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
             return
 
-        try: opts = self._crawl_opts()
-        except ValueError as e:
-            messagebox.showerror(APP_NAME, str(e))
+        if not self.crawler.start(target, opts):
+            messagebox.showinfo(APP_NAME, "A crawl is already running.")
             return
-
         self.crawl_start_btn.config(state="disabled")
         self.crawl_stop_btn.config(state="normal")
         self.status_var.set("Crawling...")
-        threading.Thread(target=self.crawler.run, args=(target, opts), daemon=True).start()
 
     def stop_crawl(self):
         self.crawler.stop_event.set()
@@ -2571,6 +3311,9 @@ class ReconWeaveApp:
             self.results_tree.tag_configure("endpoint", foreground="#f0883e", font=("Consolas", 10, "bold"))
 
     def clear_results(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before clearing its results.")
+            return
         self.crawler.reset()
         self.refresh_results()
         self.refresh_found_dirs()
@@ -2578,6 +3321,9 @@ class ReconWeaveApp:
         self.refresh_secrets()
 
     def export_results_json(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before exporting a consistent results snapshot.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], initialfile="reconweave_results.json")
         if not path: return
         try:
@@ -2603,17 +3349,24 @@ class ReconWeaveApp:
         self.status_var.set(f"Copied to clipboard: {text[:50]}")
 
     def copy_ffuf(self, url):
-        if not url.startswith("http"):
-            url = urljoin(self.target_var.get().strip() or "http://localhost/", url)
-        parsed = urlsplit(url)
-        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        params = parse_qsl(parsed.query)
-        if params:
-            fuzz_url = base + "?" + "&".join([f"{k}=FUZZ" if i == 0 else f"{k}={v}" for i, (k, v) in enumerate(params)])
-            cmd = f"ffuf -u \"{fuzz_url}\" -w wordlist.txt"
-            self.copy_to_clipboard(cmd)
-        else:
-            self.copy_to_clipboard(f"ffuf -u \"{base}/FUZZ\" -w wordlist.txt")
+        try:
+            if not urlsplit(url).scheme:
+                url = urljoin(origin_from_url(self.target_var.get() or "http://localhost/"), url)
+            parsed = urlsplit(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise ValueError("A valid HTTP(S) URL is required to build the command.")
+            base = urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", ""))
+            params = parse_qsl(parsed.query, keep_blank_values=True)
+            if params:
+                fuzz_params = [(key, "FUZZ" if index == 0 else value)
+                               for index, (key, value) in enumerate(params)]
+                fuzz_url = base + "?" + urllib.parse.urlencode(fuzz_params, doseq=True)
+            else:
+                brute_base = normalize_brute_base(base, origin_from_url(self.target_var.get() or "http://localhost/"))
+                fuzz_url = brute_base.rstrip("/") + "/FUZZ"
+            self.copy_to_clipboard(f"ffuf -u {shlex.quote(fuzz_url)} -w wordlist.txt")
+        except (ValueError, TypeError) as exc:
+            messagebox.showerror(APP_NAME, f"Could not build ffuf command: {exc}")
 
     def open_in_browser(self, url):
         if not url.startswith("http"):
@@ -2631,12 +3384,12 @@ class ReconWeaveApp:
     def refresh_found_dirs(self):
         self.found_tree.delete(*self.found_tree.get_children())
         for d in self.crawler.results.get("directories", []):
-            self.found_tree.insert("", "end", values=(d.get("path", ""), d.get("source", "")))
+            self.found_tree.insert("", "end", values=(d.get("url") or d.get("path", ""), d.get("source", "")))
 
     def _abs_base(self, path_or_url):
         target = self.target_var.get().strip()
         origin = origin_from_url(target if target else "http://localhost/")
-        if path_or_url.startswith(("http://", "https://")): return path_or_url
+        if re.match(r"^https?://", path_or_url, re.I): return path_or_url
         if not path_or_url.startswith("/"): path_or_url = "/" + path_or_url
         return urljoin(origin, path_or_url)
 
@@ -2655,8 +3408,8 @@ class ReconWeaveApp:
         return bases
 
     def _brute_opts(self):
-        target = self.target_var.get().strip()
-        origin = origin_from_url(target if target else "http://localhost/")
+        target = normalize_target_url(self.target_var.get())
+        origin = origin_from_url(target)
         try:
             threads = int(self.brute_threads_var.get() or 5)
             delay = float(self.brute_delay_var.get() or 0.2)
@@ -2672,6 +3425,7 @@ class ReconWeaveApp:
             "timeout": max(1.0, min(60.0, timeout)),
             "user_agent": self.ua_var.get().strip() or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "verify_tls": bool(self.verify_tls_var.get()), "mode": self.brute_mode_var.get(),
+            "include_subdomains": bool(self.include_subdomains_var.get()),
             "log_all": bool(self.brute_log_all_var.get()),
             "proxy_url": self.proxy_var.get().strip(),
         }
@@ -2713,17 +3467,22 @@ class ReconWeaveApp:
                 msg += "\n\nParallel mode can generate high traffic and may cause rate limiting, service degradation, or denial-of-service conditions. It is highly recommended only for local labs or explicitly authorized environments."
             if not messagebox.askokcancel("High-traffic warning", msg): return
 
+        if not self.bruter.start(bases, self.brute_wordlist_var.get(), opts, mode="directory"):
+            messagebox.showinfo(APP_NAME, "Brute engine is already running.")
+            return
         self.brute_start_selected_btn.config(state="disabled")
         self.brute_start_all_btn.config(state="disabled")
         self.brute_stop_btn.config(state="normal")
         self.status_var.set("Bruting...")
-        self.bruter.start(bases, self.brute_wordlist_var.get(), opts, mode="directory")
 
     def stop_brute(self):
         self.bruter.stop()
         self.status_var.set("Stopping brute...")
 
     def clear_brute_results(self):
+        if self.bruter.running:
+            messagebox.showinfo(APP_NAME, "Stop the brute session before clearing its results.")
+            return
         self.bruter.results = []
         self.brute_tree.delete(*self.brute_tree.get_children())
 
@@ -2830,6 +3589,9 @@ class ReconWeaveApp:
             messagebox.showerror(APP_NAME, f"Subdomain wordlist load failed: {e}")
 
     def export_urls_txt(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before exporting a consistent URL snapshot.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text", "*.txt")], initialfile="reconweave_urls.txt")
         if not path: return
         urls = set()
@@ -2848,6 +3610,9 @@ class ReconWeaveApp:
             messagebox.showerror(APP_NAME, f"Export failed: {e}")
 
     def export_dot(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before exporting a consistent graph snapshot.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".dot", filetypes=[("Graphviz DOT", "*.dot")], initialfile="reconweave_graph.dot")
         if not path: return
 
@@ -2875,6 +3640,9 @@ class ReconWeaveApp:
             messagebox.showerror(APP_NAME, f"DOT export failed: {e}")
 
     def export_mermaid(self):
+        if self.crawler.running:
+            messagebox.showinfo(APP_NAME, "Stop the crawl before exporting a consistent graph snapshot.")
+            return
         path = filedialog.asksaveasfilename(defaultextension=".md", filetypes=[("Mermaid Markdown", "*.md")], initialfile="reconweave_graph.md")
         if not path: return
 

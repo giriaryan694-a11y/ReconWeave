@@ -121,4 +121,4 @@ ReconWeave/
 
 **Author:** Aryan Giri · `giriaryan694-a11y`
 
-
+Apache2.0
